@@ -42,11 +42,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-concurrency", type=int, default=6)
     parser.add_argument("--article-concurrency", type=int, default=8)
     parser.add_argument("--extractor", default="trafilatura")
-    parser.add_argument(
-        "--require-content-extraction",
-        action="store_true",
-        help="Never fall back to a feed excerpt when reader extraction fails.",
-    )
     return parser
 
 
@@ -60,7 +55,7 @@ async def run(args: argparse.Namespace) -> dict:
         source.model_copy(
             update={
                 "content_extractor": args.extractor,
-                "require_content_extraction": args.require_content_extraction,
+                "require_content_extraction": True,
             }
         )
         for source in config.sources.rss
@@ -76,18 +71,25 @@ async def run(args: argparse.Namespace) -> dict:
             article_concurrency=args.article_concurrency,
         )
         results = await scraper.fetch_with_receipts(since)
-    items = [item for result in results for item in result.items]
+    fetched_items = [item for result in results for item in result.items]
     extraction_counts = Counter(
         str(item.metadata.get("content_extraction", {}).get("status", "unknown"))
-        for item in items
+        for item in fetched_items
     )
+    items = [
+        item
+        for item in fetched_items
+        if item.metadata.get("content_extraction", {}).get("status") == "extracted"
+        and isinstance(item.content, str)
+        and item.content.strip()
+    ]
     return {
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "since": since.isoformat(timespec="seconds"),
         "config_path": str(config_path),
         "extractor": args.extractor,
-        "require_content_extraction": args.require_content_extraction,
+        "extraction_only": True,
         "items": [item.model_dump(mode="json") for item in items],
         "source_receipts": [
             {

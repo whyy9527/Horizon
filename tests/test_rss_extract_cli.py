@@ -52,12 +52,21 @@ def test_extraction_only_runner_enforces_reader_body_without_ai(
                     }
                 },
             )
+            failed_item = ContentItem(
+                id="rss:example:2",
+                source_type=SourceType.RSS,
+                title="Unavailable body",
+                url="https://example.com/unavailable",
+                content=None,
+                published_at=datetime.now(timezone.utc),
+                metadata={"content_extraction": {"status": "failed"}},
+            )
             return [
                 RSSFetchResult(
                     source_name="Example",
                     source_url="https://example.com/feed.xml",
                     status="http_200",
-                    items=[item],
+                    items=[item, failed_item],
                 )
             ]
 
@@ -72,13 +81,13 @@ def test_extraction_only_runner_enforces_reader_body_without_ai(
                 source_concurrency=2,
                 article_concurrency=2,
                 extractor="trafilatura",
-                require_content_extraction=True,
             )
         )
     )
 
     assert captured["source"].content_extractor == "trafilatura"
     assert captured["source"].require_content_extraction is True
-    assert result["require_content_extraction"] is True
-    assert result["extraction_status_counts"] == {"extracted": 1}
+    assert result["extraction_only"] is True
+    assert result["extraction_status_counts"] == {"extracted": 1, "failed": 1}
+    assert len(result["items"]) == 1
     assert result["items"][0]["content"] == "Full extracted body."

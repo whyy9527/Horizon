@@ -102,6 +102,7 @@ def test_required_content_extractor_never_uses_feed_excerpt_on_failure() -> None
 
     assert items[0].content is None
     assert items[0].metadata["content_extraction"]["status"] == "failed"
+    assert "feed_content_length" not in items[0].metadata["content_extraction"]
 
 
 def test_unknown_extractor_name_ignored() -> None:

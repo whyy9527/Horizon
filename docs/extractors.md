@@ -53,14 +53,14 @@ model.
 horizon-rss-extract \
   --config /path/to/sources.json \
   --output /path/to/reader-receipt.json \
-  --hours 24 \
-  --require-content-extraction
+  --hours 24
 ```
 
-The JSON receipt contains every fetched RSS entry, its `content_extraction`
-status, and a receipt for every enabled feed. With
-`--require-content-extraction`, failed, blocked, or unavailable article fetches
-have `content: null`; callers must not substitute the feed excerpt.
+The JSON receipt includes a receipt for every enabled feed and counts every
+extraction status. Its `items` array contains only nonempty article bodies with
+an `extracted` status; failed, blocked, or unavailable reader requests are not
+emitted as items. The command always uses this extraction-only behavior, so
+callers cannot substitute a feed excerpt.
 
 ## Extractor types
 

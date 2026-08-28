@@ -143,15 +143,16 @@ class RSSScraper(BaseScraper):
         feed_id = str(source.url).split("//", 1)[1].replace("/", "_")
         entry_id = entry.get("id", entry.get("link", ""))
         entry_hash = hashlib.sha256(str(entry_id).encode("utf-8")).hexdigest()[:16]
-        feed_content = self._extract_content(entry)
-        content: Optional[str] = feed_content
+        feed_content = "" if source.require_content_extraction else self._extract_content(entry)
+        content: Optional[str] = feed_content or None
         extraction = {
             "requested": bool(source.content_extractor),
             "status": "not_requested",
             "extractor": source.content_extractor,
             "content_length": 0,
-            "feed_content_length": len(feed_content),
         }
+        if not source.require_content_extraction:
+            extraction["feed_content_length"] = len(feed_content)
         if source.content_extractor:
             extractor = self._extractors.get(source.content_extractor) if self._extractors else None
             url = entry.get("link", "")
