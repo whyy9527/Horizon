@@ -258,8 +258,11 @@ class RSSSourceConfig(BaseModel):
     url: HttpUrl
     enabled: bool = True
     category: Optional[str] = None
+    max_age_hours: Optional[int] = Field(default=None, gt=0)
+    source_family: Optional[str] = None
     content_extractor: Optional[str] = None
     profile: ProfileRoute = None
+    require_content_extraction: bool = False
 
 
 class RedditSubredditConfig(BaseModel):

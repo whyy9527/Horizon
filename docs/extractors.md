@@ -11,7 +11,7 @@ Extractors fetch and parse the full text of a linked article, replacing the brie
 
 1. The RSS scraper parses the feed as usual.
 2. For each entry whose source has `content_extractor` set, the scraper calls the named extractor with the entry's link URL.
-3. If the extractor returns text, it replaces the feed-provided content. If extraction fails for any reason, the feed content is used as a fallback.
+3. If the extractor returns text, it replaces the feed-provided content. By default, an extraction failure retains the feed content for compatibility. Set `require_content_extraction` when a consumer must distinguish a failed reader request from a real article body.
 
 Extractors are defined under the top-level `extractors` section of `config.json` and referenced by name from individual RSS sources.
 
@@ -30,7 +30,8 @@ Extractors are defined under the top-level `extractors` section of `config.json`
       {
         "name": "Simon Willison",
         "url": "https://simonwillison.net/atom/everything/",
-        "content_extractor": "full-text"
+        "content_extractor": "full-text",
+        "require_content_extraction": true
       }
     ]
   }
@@ -40,6 +41,26 @@ Extractors are defined under the top-level `extractors` section of `config.json`
 Each entry under `extractors` is a named extractor configuration. The `type` field determines the implementation. An RSS source references an extractor by its name via `content_extractor`.
 
 Using a type name directly (e.g. `"content_extractor": "trafilatura"`) also works — each type is pre-registered as a default extractor with default settings, so no explicit entry in `extractors` is required for the basic case.
+
+## Extraction-only command
+
+`horizon-rss-extract` is the source-quality stage for integrations that need
+article bodies before any ranking or AI work. It reads only `sources.rss` and
+`extractors` from a JSON config; it does not require an AI provider or invoke a
+model.
+
+```bash
+horizon-rss-extract \
+  --config /path/to/sources.json \
+  --output /path/to/reader-receipt.json \
+  --hours 24 \
+  --require-content-extraction
+```
+
+The JSON receipt contains every fetched RSS entry, its `content_extraction`
+status, and a receipt for every enabled feed. With
+`--require-content-extraction`, failed, blocked, or unavailable article fetches
+have `content: null`; callers must not substitute the feed excerpt.
 
 ## Extractor types
 

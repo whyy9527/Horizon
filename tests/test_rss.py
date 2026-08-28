@@ -82,6 +82,26 @@ def test_content_extractor_falls_back_on_none() -> None:
 
     assert len(items) == 1
     assert items[0].content == "Short summary from feed."
+    assert items[0].metadata["content_extraction"]["status"] == "failed"
+    assert items[0].metadata["content_extraction"]["content_length"] == 0
+
+
+def test_required_content_extractor_never_uses_feed_excerpt_on_failure() -> None:
+    client = _make_feed_client(_FEED)
+    extractor = AsyncMock()
+    extractor.extract.return_value = None
+    source = RSSSourceConfig(
+        name="Test",
+        url="https://example.com/feed.xml",
+        content_extractor="my-ext",
+        require_content_extraction=True,
+    )
+    scraper = RSSScraper([source], client, extractors=_make_registry("my-ext", extractor))
+
+    items = asyncio.run(scraper.fetch(_SINCE))
+
+    assert items[0].content is None
+    assert items[0].metadata["content_extraction"]["status"] == "failed"
 
 
 def test_unknown_extractor_name_ignored() -> None:
