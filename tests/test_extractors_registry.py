@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.extractors import ExtractorRegistry, TrafilaturaExtractor
+from src.extractors import ExtractorRegistry, PlainTextExtractor, TrafilaturaExtractor
 from src.models import TrafilaturaExtractorConfig
 
 
@@ -13,6 +13,10 @@ def test_default_trafilatura_uses_default_config():
     registry = ExtractorRegistry({})
     extractor = registry.get("trafilatura")
     assert extractor._config == TrafilaturaExtractorConfig()
+
+
+def test_default_plain_text_registered():
+    assert isinstance(ExtractorRegistry({}).get("plain_text"), PlainTextExtractor)
 
 
 def test_unknown_name_returns_none():

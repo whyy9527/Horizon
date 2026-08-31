@@ -237,6 +237,7 @@ class HackerNewsConfig(BaseModel):
 
 class ExtractorType(str, Enum):
     TRAFILATURA = "trafilatura"
+    PLAIN_TEXT = "plain_text"
 
 
 class TrafilaturaExtractorConfig(BaseModel):
@@ -245,8 +246,14 @@ class TrafilaturaExtractorConfig(BaseModel):
     favor_recall: bool = False
 
 
+class PlainTextExtractorConfig(BaseModel):
+    """Keep an already-textual public resource such as a Markdown document."""
+
+    type: Literal[ExtractorType.PLAIN_TEXT] = ExtractorType.PLAIN_TEXT
+
+
 ExtractorConfig = Annotated[
-    Union[TrafilaturaExtractorConfig],
+    Union[TrafilaturaExtractorConfig, PlainTextExtractorConfig],
     Field(discriminator="type"),
 ]
 
