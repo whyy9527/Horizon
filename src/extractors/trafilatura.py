@@ -1,6 +1,7 @@
 """Trafilatura-based article extractor."""
 
 import logging
+import re
 from typing import Optional
 
 import httpx
@@ -21,6 +22,14 @@ ARTICLE_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
+CHALLENGE_TEXT = re.compile(
+    r"(?:javascript is disabled\s+)?"
+    r"in order to continue, we need to verify that you're not a robot\.\s*"
+    r"this requires javascript\.\s*enable javascript and then reload the page\.?"
+    r"|(?:just a moment[.!…]*\s*)?enable javascript and cookies to continue[.!…]*",
+    re.IGNORECASE,
+)
+
 
 class TrafilaturaExtractor(BaseExtractor):
     def __init__(self, config: TrafilaturaExtractorConfig):
@@ -40,12 +49,20 @@ class TrafilaturaExtractor(BaseExtractor):
             logger.warning("Failed to fetch article %s: %s", url, e)
             return None
 
+        if response.headers.get("cf-mitigated") == "challenge":
+            logger.warning("Browser challenge returned instead of article %s", url)
+            return None
+
         try:
-            return trafilatura.extract(
+            text = trafilatura.extract(
                 response.text,
                 favor_precision=self._config.favor_precision,
                 favor_recall=self._config.favor_recall,
             ) or None
+            if text and CHALLENGE_TEXT.fullmatch(" ".join(text.split())):
+                logger.warning("Browser challenge extracted instead of article %s", url)
+                return None
+            return text
         except Exception as e:
             logger.warning("trafilatura extraction failed for %s: %s", url, e)
             return None

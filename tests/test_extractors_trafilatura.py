@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import datetime, timezone
 
 import httpx
 
-from src.extractors import TrafilaturaExtractor
+from src.extractors import ExtractorRegistry, TrafilaturaExtractor
 from src.extractors.trafilatura import ARTICLE_HEADERS
-from src.models import TrafilaturaExtractorConfig
+from src.models import RSSSourceConfig, TrafilaturaExtractorConfig
+from src.scrapers.rss import RSSScraper
 
 URL = "https://example.com/article"
 
@@ -76,3 +78,46 @@ def test_returns_none_when_not_installed():
     with patch.dict(sys.modules, {"trafilatura": None}):
         result = asyncio.run(_extractor().extract(URL, client))
     assert result is None
+
+
+def test_rejects_http_200_browser_challenge_text():
+    text = (
+        "JavaScript is disabled In order to continue, we need to verify that you're not a robot. "
+        "This requires JavaScript. Enable JavaScript and then reload the page."
+    )
+    with patch.dict(sys.modules, {"trafilatura": _trafilatura_mock(text)}):
+        assert asyncio.run(_extractor().extract(URL, _client())) is None
+
+
+def test_rejects_challenge_header_before_extraction():
+    client = _client()
+    client.get.return_value.headers = {"cf-mitigated": "challenge"}
+    parser = _trafilatura_mock("Some apparent body")
+    with patch.dict(sys.modules, {"trafilatura": parser}):
+        assert asyncio.run(_extractor().extract(URL, client)) is None
+    parser.extract.assert_not_called()
+
+
+def test_article_discussing_bot_checks_is_not_a_challenge():
+    text = "Researchers studied the phrase 'verify that you're not a robot' and its usability."
+    with patch.dict(sys.modules, {"trafilatura": _trafilatura_mock(text)}):
+        assert asyncio.run(_extractor().extract(URL, _client())) == text
+
+
+def test_browser_challenge_becomes_failed_rss_item_without_feed_fallback():
+    source = RSSSourceConfig(
+        name="Test", url="https://example.com/feed.xml",
+        content_extractor="trafilatura", require_content_extraction=True,
+    )
+    scraper = RSSScraper([source], _client(), ExtractorRegistry({}))
+    challenge = (
+        "JavaScript is disabled In order to continue, we need to verify that you're not a robot. "
+        "This requires JavaScript. Enable JavaScript and then reload the page."
+    )
+    with patch.dict(sys.modules, {"trafilatura": _trafilatura_mock(challenge)}):
+        item = asyncio.run(scraper._build_item(
+            source, {"title": "A real headline", "link": URL, "summary": "Feed excerpt must not return"},
+            datetime.now(timezone.utc),
+        ))
+    assert item.content is None
+    assert item.metadata["content_extraction"]["status"] == "failed"
