@@ -26,7 +26,8 @@ CHALLENGE_TEXT = re.compile(
     r"(?:javascript is disabled\s+)?"
     r"in order to continue, we need to verify that you're not a robot\.\s*"
     r"this requires javascript\.\s*enable javascript and then reload the page\.?"
-    r"|(?:just a moment[.!…]*\s*)?enable javascript and cookies to continue[.!…]*",
+    r"|(?:just a moment[.!…]*\s*)?enable javascript and cookies to continue[.!…]*"
+    r"|verification successful\.\s*waiting for [\w.-]+ to respond[.!…]*",
     re.IGNORECASE,
 )
 
@@ -54,15 +55,20 @@ class TrafilaturaExtractor(BaseExtractor):
             return None
 
         try:
-            text = trafilatura.extract(
-                response.text,
-                favor_precision=self._config.favor_precision,
-                favor_recall=self._config.favor_recall,
-            ) or None
-            if text and CHALLENGE_TEXT.fullmatch(" ".join(text.split())):
-                logger.warning("Browser challenge extracted instead of article %s", url)
-                return None
-            return text
+            return self.extract_text(response.text)
         except Exception as e:
             logger.warning("trafilatura extraction failed for %s: %s", url, e)
             return None
+
+    def extract_text(self, html: str) -> Optional[str]:
+        import trafilatura
+
+        text = trafilatura.extract(
+            html,
+            favor_precision=self._config.favor_precision,
+            favor_recall=self._config.favor_recall,
+        ) or None
+        if text and CHALLENGE_TEXT.fullmatch(" ".join(text.split())):
+            logger.warning("Browser challenge extracted instead of article")
+            return None
+        return text

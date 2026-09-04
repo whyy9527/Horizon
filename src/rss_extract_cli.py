@@ -41,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=12.0)
     parser.add_argument("--source-concurrency", type=int, default=6)
     parser.add_argument("--article-concurrency", type=int, default=8)
-    parser.add_argument("--extractor", default="trafilatura")
+    parser.add_argument("--extractor", help="Override source extractors; otherwise use source config or trafilatura")
     return parser
 
 
@@ -54,7 +54,7 @@ async def run(args: argparse.Namespace) -> dict:
     sources = [
         source.model_copy(
             update={
-                "content_extractor": args.extractor,
+                "content_extractor": args.extractor or source.content_extractor or "trafilatura",
                 "require_content_extraction": True,
             }
         )
@@ -88,7 +88,7 @@ async def run(args: argparse.Namespace) -> dict:
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "since": since.isoformat(timespec="seconds"),
         "config_path": str(config_path),
-        "extractor": args.extractor,
+        "extractor": args.extractor or "per-source",
         "extraction_only": True,
         "items": [item.model_dump(mode="json") for item in items],
         "source_receipts": [

@@ -3,11 +3,13 @@
 from typing import Dict, Optional
 
 from .base import BaseExtractor
+from .browser import BrowserExtractor
 from .plain_text import PlainTextExtractor
 from .trafilatura import TrafilaturaExtractor
 from ..models import (
     ExtractorConfig,
     ExtractorType,
+    BrowserExtractorConfig,
     PlainTextExtractorConfig,
     TrafilaturaExtractorConfig,
 )
@@ -15,11 +17,14 @@ from ..models import (
 _DEFAULTS: Dict[str, ExtractorConfig] = {
     ExtractorType.TRAFILATURA: TrafilaturaExtractorConfig(),
     ExtractorType.PLAIN_TEXT: PlainTextExtractorConfig(),
+    ExtractorType.BROWSER: BrowserExtractorConfig(),
 }
 
 
 def _build(cfg: ExtractorConfig) -> BaseExtractor:
     match cfg:
+        case BrowserExtractorConfig():
+            return BrowserExtractor(cfg)
         case TrafilaturaExtractorConfig():
             return TrafilaturaExtractor(cfg)
         case PlainTextExtractorConfig():

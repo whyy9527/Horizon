@@ -238,6 +238,7 @@ class HackerNewsConfig(BaseModel):
 class ExtractorType(str, Enum):
     TRAFILATURA = "trafilatura"
     PLAIN_TEXT = "plain_text"
+    BROWSER = "browser"
 
 
 class TrafilaturaExtractorConfig(BaseModel):
@@ -252,8 +253,14 @@ class PlainTextExtractorConfig(BaseModel):
     type: Literal[ExtractorType.PLAIN_TEXT] = ExtractorType.PLAIN_TEXT
 
 
+class BrowserExtractorConfig(TrafilaturaExtractorConfig):
+    """Read a public article in an ordinary visible Chromium browser."""
+
+    type: Literal[ExtractorType.BROWSER] = ExtractorType.BROWSER
+
+
 ExtractorConfig = Annotated[
-    Union[TrafilaturaExtractorConfig, PlainTextExtractorConfig],
+    Union[TrafilaturaExtractorConfig, PlainTextExtractorConfig, BrowserExtractorConfig],
     Field(discriminator="type"),
 ]
 

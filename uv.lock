@@ -1117,6 +1117,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+browser = [
+    { name = "playwright" },
+]
 dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -1144,6 +1147,7 @@ requires-dist = [
     { name = "openbb", marker = "extra == 'openbb'", specifier = ">=4.4.0" },
     { name = "openbb-benzinga", marker = "extra == 'openbb'", specifier = ">=1.6.0" },
     { name = "opencc-python-reimplemented", specifier = ">=0.1.7" },
+    { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.62.0" },
     { name = "playwright", marker = "extra == 'twitter'", specifier = ">=1.62.0" },
     { name = "playwright-stealth", marker = "extra == 'twitter'", specifier = ">=2.0.3" },
     { name = "pydantic", specifier = ">=2.9.0" },
@@ -1155,7 +1159,7 @@ requires-dist = [
     { name = "tenacity", specifier = ">=9.0.0" },
     { name = "trafilatura", specifier = ">=2.1.0" },
 ]
-provides-extras = ["dev", "openbb", "twitter"]
+provides-extras = ["browser", "dev", "openbb", "twitter"]
 
 [[package]]
 name = "hpack"

@@ -5,14 +5,19 @@ import json
 from argparse import Namespace
 from datetime import datetime, timezone
 from pathlib import Path
+import pytest
 
 from src.models import ContentItem, SourceType
 from src.rss_extract_cli import run
 from src.scrapers.rss import RSSFetchResult
 
 
+@pytest.mark.parametrize("configured,override,expected", [
+    (None, None, "trafilatura"), ("browser", None, "browser"),
+    ("browser", "trafilatura", "trafilatura"),
+])
 def test_extraction_only_runner_enforces_reader_body_without_ai(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, configured, override, expected
 ) -> None:
     config_path = tmp_path / "sources.json"
     config_path.write_text(
@@ -24,6 +29,7 @@ def test_extraction_only_runner_enforces_reader_body_without_ai(
                             "name": "Example",
                             "url": "https://example.com/feed.xml",
                             "category": "tech-ai",
+                            "content_extractor": configured,
                         }
                     ]
                 }
@@ -80,12 +86,12 @@ def test_extraction_only_runner_enforces_reader_body_without_ai(
                 timeout=8.0,
                 source_concurrency=2,
                 article_concurrency=2,
-                extractor="trafilatura",
+                extractor=override,
             )
         )
     )
 
-    assert captured["source"].content_extractor == "trafilatura"
+    assert captured["source"].content_extractor == expected
     assert captured["source"].require_content_extraction is True
     assert result["extraction_only"] is True
     assert result["extraction_status_counts"] == {"extracted": 1, "failed": 1}
