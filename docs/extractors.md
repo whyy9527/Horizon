@@ -68,15 +68,7 @@ callers cannot substitute a feed excerpt.
 
 **File**: `src/extractors/trafilatura.py`
 
-Uses the [trafilatura](https://trafilatura.readthedocs.io/) library to extract main article text from HTML. Requires the `trafilatura` optional dependency:
-
-```bash
-# Local
-uv sync --extra trafilatura
-
-# Docker
-docker compose build --build-arg EXTRAS=trafilatura horizon
-```
+Uses the [trafilatura](https://trafilatura.readthedocs.io/) library to extract main article text from HTML. It is included in the base install for both local and Docker deployments. Enable it per RSS source with `content_extractor`; no extra dependency is needed.
 
 **Config fields**:
 

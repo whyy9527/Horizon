@@ -36,7 +36,7 @@ SOURCE_REGISTRY = {
     SourceType.RSS.value: SourceDefinition("rss", config_is_list=True),
     SourceType.REDDIT.value: SourceDefinition("reddit", item_fields=("subreddits", "users")),
     SourceType.TELEGRAM.value: SourceDefinition("telegram", item_fields=("channels",)),
-    SourceType.TWITTER.value: SourceDefinition("twitter", item_fields=("users",)),
+    SourceType.TWITTER.value: SourceDefinition("twitter", item_fields=("users", "keywords")),
     SourceType.OPENBB.value: SourceDefinition("openbb", item_fields=("watchlists",)),
     SourceType.OSSINSIGHT.value: SourceDefinition("ossinsight"),
     SourceType.GDELT.value: SourceDefinition("gdelt"),
@@ -337,11 +337,14 @@ class TwitterConfig(BaseModel):
     Two modes are supported:
     - "apify": Use Apify scweet actor (requires APIFY_TOKEN, more reliable)
     - "playwright": Use Playwright + browser cookies (free, no token needed)
+
+    `keywords` uses Apify search mode. Playwright logs a warning and skips them.
     """
 
     enabled: bool = True
     mode: str = "apify"  # "apify" or "playwright"
     users: List[str] = Field(default_factory=list)
+    keywords: List[str] = Field(default_factory=list)
     fetch_limit: int = 10
     category: Optional[str] = None
     profile: ProfileRoute = None
@@ -535,6 +538,14 @@ class WebhookConfig(BaseModel):
         return v
 
 
+class WeChatConfig(BaseModel):
+    """Optional iLink delivery; credentials live in the data directory's session file."""
+
+    enabled: bool = False
+    languages: Optional[List[str]] = None
+    chunk_size: int = Field(default=4000, gt=0, le=4000)
+
+
 class EmailConfig(BaseModel):
     """Email configuration for updates/subscriptions."""
 
@@ -630,3 +641,4 @@ class Config(BaseModel):
     extractors: Dict[str, ExtractorConfig] = Field(default_factory=dict)
     email: Optional[EmailConfig] = None
     webhook: Optional[WebhookConfig] = None
+    wechat: Optional[WeChatConfig] = None
