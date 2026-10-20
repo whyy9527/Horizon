@@ -69,7 +69,7 @@ def _make_registry(name: str, extractor):
 def test_content_extractor_replaces_feed_content() -> None:
     client = _make_feed_client(_FEED)
     extractor = AsyncMock()
-    extractor.extract.return_value = "Full article text from extractor."
+    extractor.extract_with_receipt.return_value = ("Full article text from extractor.", {})
 
     source = RSSSourceConfig(
         name="Test", url="https://example.com/feed.xml", content_extractor="my-ext"
@@ -79,13 +79,13 @@ def test_content_extractor_replaces_feed_content() -> None:
 
     assert len(items) == 1
     assert items[0].content == "Full article text from extractor."
-    extractor.extract.assert_awaited_once_with("https://example.com/item-1", client)
+    extractor.extract_with_receipt.assert_awaited_once_with("https://example.com/item-1", client)
 
 
 def test_content_extractor_falls_back_on_none() -> None:
     client = _make_feed_client(_FEED)
     extractor = AsyncMock()
-    extractor.extract.return_value = None  # extraction failed
+    extractor.extract_with_receipt.return_value = (None, {})  # extraction failed
 
     source = RSSSourceConfig(
         name="Test", url="https://example.com/feed.xml", content_extractor="my-ext"
@@ -102,7 +102,7 @@ def test_content_extractor_falls_back_on_none() -> None:
 def test_required_content_extractor_never_uses_feed_excerpt_on_failure() -> None:
     client = _make_feed_client(_FEED)
     extractor = AsyncMock()
-    extractor.extract.return_value = None
+    extractor.extract_with_receipt.return_value = (None, {})
     source = RSSSourceConfig(
         name="Test",
         url="https://example.com/feed.xml",

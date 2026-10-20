@@ -19,7 +19,7 @@ class BrowserExtractor(TrafilaturaExtractor):
         super().__init__(config)
         self._semaphore = asyncio.Semaphore(1)
 
-    async def extract(self, url: str, client: httpx.AsyncClient) -> str | None:
+    async def extract_with_receipt(self, url: str, client: httpx.AsyncClient) -> tuple[str | None, dict]:
         try:
             from playwright.async_api import async_playwright
 
@@ -53,9 +53,9 @@ class BrowserExtractor(TrafilaturaExtractor):
                     page = await context.new_page()
                     await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                     await page.locator("main h1, article h1").first.wait_for(timeout=30000)
-                    return self.extract_text(await page.content())
+                    return self.extract_text_with_receipt(await page.content())
                 finally:
                     await browser.close()
         except Exception as exc:
             logger.warning("Browser article extraction failed for %s: %s", url, type(exc).__name__)
-            return None
+            return None, {}

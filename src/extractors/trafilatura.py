@@ -7,6 +7,7 @@ from typing import Optional
 import httpx
 
 from .base import BaseExtractor
+from .html_components import clean_registration_cards
 from ..models import TrafilaturaExtractorConfig
 from ..url_security import UnsafeURLError, safe_request
 
@@ -37,32 +38,46 @@ class TrafilaturaExtractor(BaseExtractor):
         self._config = config
 
     async def extract(self, url: str, client: httpx.AsyncClient) -> Optional[str]:
+        text, _ = await self.extract_with_receipt(url, client)
+        return text
+
+    async def extract_with_receipt(self, url: str, client: httpx.AsyncClient) -> tuple[Optional[str], dict]:
         try:
             import trafilatura
         except ImportError:
             logger.warning("trafilatura is not installed; install with: uv pip install trafilatura>=2.1.0")
-            return None
+            return None, {}
 
         try:
             response = await safe_request(client, "GET", url, headers=ARTICLE_HEADERS)
             response.raise_for_status()
         except (httpx.HTTPError, UnsafeURLError) as e:
             logger.warning("Failed to fetch article %s: %s", url, e)
-            return None
+            return None, {}
 
         if response.headers.get("cf-mitigated") == "challenge":
             logger.warning("Browser challenge returned instead of article %s", url)
-            return None
+            return None, {}
 
         try:
-            return self.extract_text(response.text)
+            return self.extract_text_with_receipt(response.text)
         except Exception as e:
             logger.warning("trafilatura extraction failed for %s: %s", url, e)
-            return None
+            return None, {}
 
     def extract_text(self, html: str) -> Optional[str]:
+        text, _ = self.extract_text_with_receipt(html)
+        return text
+
+    def extract_text_with_receipt(self, html: str) -> tuple[Optional[str], dict]:
         import trafilatura
 
+        try:
+            html, receipt = clean_registration_cards(html)
+        except Exception as exc:
+            # Failed component recognition must not discard a usable article.
+            logger.warning("HTML component cleaning skipped: %s", type(exc).__name__)
+            receipt = {"status": "failed", "error": type(exc).__name__}
         text = trafilatura.extract(
             html,
             favor_precision=self._config.favor_precision,
@@ -70,5 +85,5 @@ class TrafilaturaExtractor(BaseExtractor):
         ) or None
         if text and CHALLENGE_TEXT.fullmatch(" ".join(text.split())):
             logger.warning("Browser challenge extracted instead of article")
-            return None
-        return text
+            return None, receipt
+        return text, receipt

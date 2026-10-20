@@ -65,12 +65,12 @@ async def run(args: argparse.Namespace) -> dict:
     async def extract(entry: URLExtractionInput) -> dict:
         try:
             async with semaphore:
-                content = await extractor.extract(entry.url, client)
+                content, cleaning = await extractor.extract_with_receipt(entry.url, client)
         except Exception as exc:  # Individual public pages must not abort the batch.
             return {"id": entry.id, "url": entry.url, "status": "error", "error": str(exc)}
         if not isinstance(content, str) or not content.strip():
             return {"id": entry.id, "url": entry.url, "status": "failed", "error": None}
-        return {
+        receipt = {
             "id": entry.id,
             "url": entry.url,
             "status": "extracted",
@@ -78,6 +78,9 @@ async def run(args: argparse.Namespace) -> dict:
             "content_length": len(content),
             "error": None,
         }
+        if cleaning:
+            receipt["html_cleaning"] = cleaning
+        return receipt
 
     async with httpx.AsyncClient(timeout=args.timeout) as client:
         receipts = await asyncio.gather(*(extract(entry) for entry in inputs))

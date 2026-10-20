@@ -6,6 +6,7 @@ from argparse import Namespace
 from pathlib import Path
 
 from src.url_extract_cli import run
+from src.extractors.base import BaseExtractor
 
 
 def test_url_extraction_runner_returns_only_full_bodies(tmp_path: Path, monkeypatch) -> None:
@@ -23,7 +24,7 @@ def test_url_extraction_runner_returns_only_full_bodies(tmp_path: Path, monkeypa
         encoding="utf-8",
     )
 
-    class FakeExtractor:
+    class FakeExtractor(BaseExtractor):
         async def extract(self, url, _client):
             return "Full public body." if url.endswith("first") else None
 

@@ -162,7 +162,9 @@ class RSSScraper(BaseScraper):
                 extraction["status"] = "missing_article_url"
             else:
                 async with self._article_semaphore:
-                    full = await extractor.extract(url, self.client)
+                    full, cleaning = await extractor.extract_with_receipt(url, self.client)
+                if cleaning:
+                    extraction["html_cleaning"] = cleaning
                 if full:
                     content = full
                     extraction["status"] = "extracted"
