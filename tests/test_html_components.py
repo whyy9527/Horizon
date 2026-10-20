@@ -131,3 +131,44 @@ def test_url_cli_preserves_cleaning_receipt(tmp_path):
                                           timeout=8, article_concurrency=2)))
     assert result['receipts'][0]['html_cleaning']['removals'][0]['target'] == '/signup'
     assert 'Join the collection' not in result['items'][0]['content']
+
+
+
+def test_article_opening_uses_dom_identity_not_feed_title_and_keeps_body_verbatim():
+    from src.extractors.html_components import clean_article_opening
+    title = "An entirely rewritten page headline"
+    body = "The report starts here.\nA section heading\nFurther evidence remains."
+    source = f'<article><h1>{title}</h1><details><summary>Contents</summary><nav><a href="#section">Jump</a></nav></details><p>The report starts here.</p><h2 id="section">A section heading</h2><p>Further evidence remains.</p></article>'
+    text = title+'\nContents\n'+body
+    cleaned, proof = clean_article_opening(text, source)
+    assert cleaned == body
+    assert [r['rule'] for r in proof['removals']] == ['article_primary_heading', 'article_table_of_contents_label']
+    assert all(text[r['start']:r['end']] == r['text'] for r in proof['removals'])
+    assert proof['output_sha256'] == hashlib.sha256(body.encode()).hexdigest()
+    assert clean_article_opening(cleaned, source) == (cleaned, {})
+
+
+@pytest.mark.parametrize('source', [
+    '<main><h1>Title</h1><p>Keep body.</p></main>',
+    '<article><h1>Title</h1><h1>Another title</h1><p>Keep body.</p></article>',
+    '<article><h1>Different title</h1><p>Keep body.</p></article>',
+    '<article><blockquote><h1>Title</h1></blockquote><p>Keep body.</p></article>',
+])
+def test_uncertain_or_quoted_headings_are_preserved(source):
+    from src.extractors.html_components import clean_article_opening
+    assert clean_article_opening('Title\nKeep body.', source) == ('Title\nKeep body.', {})
+
+
+def test_non_navigation_details_and_article_prose_are_preserved():
+    from src.extractors.html_components import clean_article_opening
+    source = '<article><h1>Title</h1><details><summary>Important explanation</summary><p>Keep this explanation.</p></details><p>Body.</p></article>'
+    text = 'Title\nImportant explanation\nKeep this explanation.\nBody.'
+    assert clean_article_opening(text, source)[0] == text.split('\n',1)[1]
+
+
+def test_extractor_trims_primary_heading_but_keeps_original_body():
+    source = '<html><body><article>'+STORY+'</article></body></html>'
+    expected = trafilatura.extract(source).split('\n',1)[1]
+    text, receipt = TrafilaturaExtractor(TrafilaturaExtractorConfig()).extract_text_with_receipt(source)
+    assert text == expected
+    assert receipt['article_opening']['removals'][0]['rule'] == 'article_primary_heading'

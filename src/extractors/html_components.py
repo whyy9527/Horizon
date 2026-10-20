@@ -82,3 +82,51 @@ def clean_registration_cards(source: str) -> tuple[str, dict]:
         "output_sha256": hashlib.sha256(cleaned.encode()).hexdigest(),
         "removals": removals,
     }
+
+
+def clean_article_opening(text: str, source: str) -> tuple[str, dict]:
+    """Trim only a DOM-proven title/TOC prefix, leaving article prose untouched.
+
+    A rewritten feed title need not match the page's H1. The sole H1 in an
+    explicit article identifies it instead. No fuzzy text or publisher rules.
+    """
+    tree = lxml_html.fromstring(source)
+    articles = tree.xpath("//article")
+    if len(articles) != 1:
+        return text, {}
+    article = articles[0]
+    headings = article.xpath(".//h1[not(ancestor::blockquote or ancestor::pre or ancestor::code)]")
+    if len(headings) != 1:
+        return text, {}
+    candidates = [(headings[0], "article_primary_heading")]
+    for details in article.xpath(".//details"):
+        children = [n for n in details if isinstance(n.tag, str)]
+        if [n.tag for n in children] != ["summary", "nav"]:
+            continue
+        nav = children[1]
+        links = nav.xpath(".//a[@href]")
+        if (links and not details.xpath(".//pre|.//code|.//blockquote")
+                and all(a.get("href").startswith("#") and len(a.get("href")) > 1
+                        and tree.xpath("//*[@id=$target]", target=a.get("href")[1:]) for a in links)):
+            candidates.append((children[0], "article_table_of_contents_label"))
+    offset, removals = 0, []
+    for node, rule in candidates:
+        start = offset
+        while start < len(text) and text[start].isspace():
+            start += 1
+        end = text.find("\n", start)
+        if end < 0:
+            continue  # A title alone is not a usable article body.
+        expected = " ".join(node.text_content().split())
+        if not expected or " ".join(text[start:end].split()) != expected:
+            continue
+        offset = end + 1
+        removals.append({"rule": rule, "xpath": tree.getroottree().getpath(node),
+                         "start": start, "end": end, "text": text[start:end],
+                         "serialized_html": lxml_html.tostring(node, encoding="unicode", with_tail=False)})
+    if not removals or not text[offset:].strip():
+        return text, {}
+    cleaned = text[offset:].lstrip()
+    return cleaned, {"input_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                     "output_sha256": hashlib.sha256(cleaned.encode()).hexdigest(),
+                     "removals": removals}

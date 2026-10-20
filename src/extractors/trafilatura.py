@@ -7,7 +7,7 @@ from typing import Optional
 import httpx
 
 from .base import BaseExtractor
-from .html_components import clean_registration_cards
+from .html_components import clean_article_opening, clean_registration_cards
 from ..models import TrafilaturaExtractorConfig
 from ..url_security import UnsafeURLError, safe_request
 
@@ -86,4 +86,11 @@ class TrafilaturaExtractor(BaseExtractor):
         if text and CHALLENGE_TEXT.fullmatch(" ".join(text.split())):
             logger.warning("Browser challenge extracted instead of article")
             return None, receipt
+        if text:
+            try:
+                text, opening = clean_article_opening(text, html)
+                if opening:
+                    receipt = {**receipt, "article_opening": opening}
+            except Exception as exc:
+                logger.warning("Article opening cleaning skipped: %s", type(exc).__name__)
         return text, receipt
