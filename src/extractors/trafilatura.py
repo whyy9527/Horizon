@@ -1,5 +1,6 @@
 """Trafilatura-based article extractor."""
 
+import hashlib
 import logging
 import re
 from typing import Optional
@@ -7,7 +8,7 @@ from typing import Optional
 import httpx
 
 from .base import BaseExtractor
-from .html_components import clean_article_opening, clean_registration_cards
+from .html_components import clean_article_opening, clean_registration_cards, prepare_article_content
 from ..models import TrafilaturaExtractorConfig
 from ..url_security import UnsafeURLError, safe_request
 
@@ -83,6 +84,14 @@ class TrafilaturaExtractor(BaseExtractor):
             favor_precision=self._config.favor_precision,
             favor_recall=self._config.favor_recall,
         ) or None
+        html, article_content = prepare_article_content(html, text or '')
+        if article_content:
+            receipt = {**receipt, "article_content": article_content}
+            text = trafilatura.extract(
+                html,
+                favor_precision=self._config.favor_precision,
+                favor_recall=self._config.favor_recall,
+            ) or None
         if text and CHALLENGE_TEXT.fullmatch(" ".join(text.split())):
             logger.warning("Browser challenge extracted instead of article")
             return None, receipt
@@ -93,4 +102,6 @@ class TrafilaturaExtractor(BaseExtractor):
                     receipt = {**receipt, "article_opening": opening}
             except Exception as exc:
                 logger.warning("Article opening cleaning skipped: %s", type(exc).__name__)
+        if article_content:
+            receipt['article_content']['extracted_sha256'] = hashlib.sha256((text or '').encode()).hexdigest()
         return text, receipt

@@ -1,10 +1,81 @@
-"""Conservative removal of standalone registration cards before text extraction."""
+"""Conservative DOM boundaries and component handling for article extraction."""
 
 import hashlib
 from copy import deepcopy
 from urllib.parse import urlsplit
 
 from lxml import html as lxml_html
+
+
+def prepare_article_content(source: str, extracted_text: str = '') -> tuple[str, dict]:
+    """Respect an unambiguous article boundary and omit timed live UI steps.
+
+    This is an HTML adapter for the pinned Trafilatura selector order, not a
+    replacement text extractor. No prose is rewritten or appended to its output.
+    """
+    from trafilatura.xpaths import BODY_XPATH
+
+    tree = lxml_html.document_fromstring(source)
+    articles = tree.xpath('//article')
+    if len(articles) != 1:
+        return source, {}
+    article = articles[0]
+    headings = article.xpath('.//h1[not(ancestor::blockquote or ancestor::pre or ancestor::code)]')
+    if len(headings) != 1:
+        return source, {}
+    paths = {node: tree.getroottree().getpath(node) for node in article.iter()}
+    removals, adjustments = [], []
+    for node in article.xpath('.//*[@aria-live="polite" or @aria-live="assertive"]'):
+        # Live news, static transcripts and code examples are editorial content.
+        # Require multiple explicitly timed, indexed, hidden animation states.
+        if node.xpath('ancestor::pre|ancestor::code|ancestor::blockquote|ancestor::table|'
+                      './/pre|.//code|.//blockquote|.//table|.//h1|.//h2'):
+            continue
+        steps = node.xpath('.//*[@data-index and @data-duration and @aria-hidden="true"]')
+        if (len({step.get('data-index') for step in steps}) < 2
+                or not all(step.get('data-index').isdigit()
+                           and step.get('data-duration').isdigit()
+                           and int(step.get('data-duration')) > 0 for step in steps)):
+            continue
+        if any(parent in {r[0] for r in removals} for parent in node.iterancestors()):
+            continue
+        removals.append((node, {'rule': 'timed_live_interface', 'xpath': paths[node],
+                               'text': node.text_content(),
+                               'serialized_html': lxml_html.tostring(node, encoding='unicode', with_tail=False)}))
+
+    # Trafilatura tries named inner bodies before <article>. An author-supplied
+    # article can contain a real introduction outside that narrower container.
+    matches = BODY_XPATH[0](tree)
+    if matches and article in matches[0].iterancestors():
+        selected = matches[0]
+        order = list(article.iter())
+        heading_pos, body_pos = order.index(headings[0]), order.index(selected)
+        intro = [node for node in order[heading_pos+1:body_pos] if node.tag == 'p'
+                 and not node.xpath('ancestor::header|ancestor::nav|ancestor::footer|'
+                                    'ancestor::aside|ancestor::figure|ancestor::blockquote|'
+                                    'ancestor::pre|ancestor::code|ancestor::*[@aria-hidden="true" or @hidden]')
+                 and not any(parent in {r[0] for r in removals} for parent in node.iterancestors())
+                 and ''.join(node.xpath('.//text()[not(ancestor::a or ancestor::time)]')).strip()]
+        normalized_text = ' '.join(extracted_text.split())
+        missing_intro = [node for node in intro
+                         if ' '.join(node.text_content().split()) not in normalized_text]
+        if heading_pos < body_pos and missing_intro:
+            adjustments.append({'rule': 'explicit_article_includes_intro', 'xpath': paths[article],
+                                'selected_body_xpath': paths[selected],
+                                'previous_itemprop': article.get('itemprop'),
+                                'intro': [{'xpath': paths[node], 'text': node.text_content(),
+                                           'serialized_html': lxml_html.tostring(node, encoding='unicode', with_tail=False)}
+                                          for node in missing_intro]})
+            article.set('itemprop', 'articleBody')
+
+    if not removals and not adjustments:
+        return source, {}
+    for node, _ in removals:
+        node.drop_tree()
+    cleaned = lxml_html.tostring(tree, encoding='unicode')
+    return cleaned, {'input_sha256': hashlib.sha256(source.encode()).hexdigest(),
+                     'output_sha256': hashlib.sha256(cleaned.encode()).hexdigest(),
+                     'removals': [proof for _, proof in removals], 'adjustments': adjustments}
 
 
 def clean_registration_cards(source: str) -> tuple[str, dict]:

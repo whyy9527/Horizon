@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+from pathlib import Path
 from argparse import Namespace
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -8,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import trafilatura
 
-from src.extractors.html_components import clean_registration_cards
+from src.extractors.html_components import clean_registration_cards, prepare_article_content
 from src.extractors.trafilatura import TrafilaturaExtractor
 from src.extractors import ExtractorRegistry
 from src.models import RSSSourceConfig, TrafilaturaExtractorConfig
@@ -172,3 +173,84 @@ def test_extractor_trims_primary_heading_but_keeps_original_body():
     text, receipt = TrafilaturaExtractor(TrafilaturaExtractorConfig()).extract_text_with_receipt(source)
     assert text == expected
     assert receipt['article_opening']['removals'][0]['rule'] == 'article_primary_heading'
+
+
+@pytest.mark.parametrize('name', ['lab', 'voxtral'])
+def test_real_article_dom_recovers_lead_without_rewriting_or_losing_body(name):
+    source = (Path(__file__).parent/'fixtures/article_content'/f'{name}.html').read_text()
+    text, receipt = TrafilaturaExtractor(TrafilaturaExtractorConfig()).extract_text_with_receipt(source)
+    assert receipt['article_content']['extracted_sha256'] == hashlib.sha256(text.encode()).hexdigest()
+    if name == 'lab':
+        assert text.startswith('Gamow Labs builds frontier AI systems')
+        assert 'To address this challenge, we present LabRobotBench.' in text
+        assert 'GPT 6.1 SolCodex46.7%' in text  # Useful results stay in the full body.
+        assert receipt['article_content']['adjustments'][0]['intro']
+    else:
+        # This reduced DOM retains the publisher's Summary heading; full-page
+        # fallback selection is separately checked in the recorded URL replay.
+        assert text.index('Voxtral 3 introduces a cutting-edge voice agent SDK') < 30
+        assert 'Merci de recevoir' not in text
+        assert 'book_appointment' not in text
+        assert 'Speech transcription and voice generation have come a long way' in text
+        assert len(receipt['article_content']['removals']) == 2
+    cleaned, proof = prepare_article_content(source)
+    assert proof['input_sha256'] == hashlib.sha256(source.encode()).hexdigest()
+    assert proof['output_sha256'] == hashlib.sha256(cleaned.encode()).hexdigest()
+    assert prepare_article_content(cleaned) == (cleaned, {})
+    from lxml import html
+    tree = html.document_fromstring(source)
+    for removal in proof['removals']:
+        assert tree.xpath(removal['xpath'])[0].text_content() == removal['text']
+
+
+def live_steps():
+    return ('<div aria-live="polite"><div data-index="0" data-duration="2000" aria-hidden="true">'
+            '<p>A staged utterance.</p></div><div data-index="1" data-duration="3000" '
+            'aria-hidden="true"><p>Another staged utterance.</p></div></div>')
+
+
+@pytest.mark.parametrize('body', [
+    '<div aria-live="polite"><p>A live news update.</p></div>',
+    '<p>Agent: a static transcript. Tool call: an editorial explanation.</p>',
+    '<blockquote>'+live_steps()+'</blockquote>',
+    '<table><tr><td>'+live_steps()+'</td></tr></table>',
+    '<pre><code>Agent / Tool call / Result</code></pre>',
+    live_steps().replace('data-duration="2000"', 'data-duration="not-a-time"'),
+    live_steps().replace('data-index="1"', 'data-index="0"'),
+    live_steps().replace('aria-live="polite"', 'aria-live="off"'),
+    live_steps().replace('<p>A staged utterance.</p>', '<h2>Editorial heading</h2>'),
+])
+def test_live_news_static_transcripts_quotes_tables_and_uncertain_ui_are_unchanged(body):
+    source = '<article><h1>A report</h1>'+body+'<p>Actual report.</p></article>'
+    assert prepare_article_content(source) == (source, {})
+
+
+@pytest.mark.parametrize('source', [
+    '<main><h1>Title</h1>'+live_steps()+'</main>',
+    '<article><h1>One</h1><h1>Two</h1>'+live_steps()+'</article>',
+    '<article><h1>One</h1>'+live_steps()+'</article><article>Other article</article>',
+    '<article><h1>Title</h1><p><a href="#body">Contents</a></p><div class="post-body"><p>Body.</p></div></article>',
+    '<article><h1>Title</h1><div class="post-body"><p>First paragraph.</p><p>Next paragraph.</p></div></article>',
+    '<article><h1>Title</h1><header><p>By the author</p></header><div class="post-body"><p>Body.</p></div></article>',
+])
+def test_ambiguous_articles_and_inner_bodies_without_excluded_intro_are_unchanged(source):
+    assert prepare_article_content(source) == (source, {})
+
+
+def test_intro_already_retained_by_trafilatura_does_not_trigger_a_second_extraction():
+    source = '<article><h1>Title</h1><p>The original lead.</p><div class="post-body"><p>Details.</p></div></article>'
+    assert prepare_article_content(source, 'The original lead.\nDetails.') == (source, {})
+
+
+def test_rss_forwards_article_content_receipt_and_recovered_body():
+    source = RSSSourceConfig(name='Example', url='https://example.com/feed',
+                             content_extractor='trafilatura', require_content_extraction=True)
+    response = MagicMock()
+    response.headers = {}
+    response.text = (Path(__file__).parent/'fixtures/article_content/lab.html').read_text()
+    scraper = RSSScraper([source], AsyncMock(), ExtractorRegistry({}))
+    with patch('src.extractors.trafilatura.safe_request', new=AsyncMock(return_value=response)):
+        item = asyncio.run(scraper._build_item(source, {'title':'LabRobotBench', 'link':'https://example.com/lab'},
+                                              datetime.now(timezone.utc)))
+    assert item.content.startswith('Gamow Labs builds')
+    assert item.metadata['content_extraction']['html_cleaning']['article_content']['adjustments']
