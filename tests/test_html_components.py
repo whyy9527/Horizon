@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import trafilatura
+from lxml import html as lxml_html
 
 from src.extractors.html_components import clean_registration_cards, prepare_article_content
 from src.extractors.trafilatura import TrafilaturaExtractor
@@ -76,6 +77,158 @@ def test_multiple_cards_record_paths_before_any_node_is_removed():
     assert [removal['xpath'] for removal in receipt['removals']] == [
         '/html/body/div[1]', '/html/body/div[2]',
     ]
+
+
+def test_inline_email_signup_removes_component_and_only_explicit_adjacent_promos():
+    source = '''<html><body><article><h1>Report</h1><div class="body markup">
+<p><strong>Thanks for reading! If you haven't subscribed, click the button below:</strong></p>
+<div class="subscribe-widget" data-component-name="SubscribeWidget"><form action="/api/v1/free" method="post"><input type="email"/><button type="submit">Subscribe</button></form></div>
+<p><strong>By subscribing, you'll join over 80,000 readers!</strong></p>
+<p>The article examines how a subscription business model affects publisher revenue.</p>
+</div></article></body></html>'''
+
+    cleaned, receipt = clean_registration_cards(source)
+    assert 'Thanks for reading' not in cleaned
+    assert "By subscribing" not in cleaned
+    assert 'type="email"' not in cleaned
+    assert 'subscription business model affects publisher revenue' in cleaned
+    assert [row['rule'] for row in receipt['removals']] == [
+        'adjacent_subscription_promotion_paragraph',
+        'adjacent_subscription_promotion_paragraph',
+        'email_signup_subscription_component',
+    ]
+    assert [row['xpath'] for row in receipt['removals']] == [
+        '/html/body/article/div/p[1]', '/html/body/article/div/p[2]',
+        '/html/body/article/div/div',
+    ]
+    original_dom = lxml_html.document_fromstring(source)
+    for row in receipt['removals']:
+        original_node = original_dom.xpath(row['xpath'])[0]
+        assert row['text'] == original_node.text_content()
+        assert row['serialized_html'] == lxml_html.tostring(
+            original_node, encoding='unicode', with_tail=False)
+    assert receipt['input_sha256'] == hashlib.sha256(source.encode()).hexdigest()
+    assert receipt['output_sha256'] == hashlib.sha256(cleaned.encode()).hexdigest()
+    assert clean_registration_cards(cleaned) == (cleaned, {})
+
+
+def test_multiple_inline_subscription_widgets_keep_original_paths_and_clear_promos():
+    widget = ('<div class="subscription-widget-wrap"><div class="preamble">'
+              '<p>Thanks for reading! To receive new posts, consider subscribing!</p></div>'
+              '<div class="subscribe-widget" data-component-name="SubscribeWidget">'
+              '<form><input type="email"/><button type="submit">Subscribe</button></form>'
+              '</div></div>')
+    source = '<article><h1>Report</h1>'+widget+'<p>Real paragraph between sections.</p>'+widget+'</article>'
+
+    cleaned, receipt = clean_registration_cards(source)
+    assert 'subscription-widget-wrap' not in cleaned
+    assert 'Thanks for reading' not in cleaned
+    assert 'Real paragraph between sections.' in cleaned
+    assert [row['xpath'] for row in receipt['removals'] if row['rule'] == 'email_signup_subscription_component'] == [
+        '/html/body/article/div[1]', '/html/body/article/div[2]',
+    ]
+    assert clean_registration_cards(cleaned) == (cleaned, {})
+
+
+@pytest.mark.parametrize('container', ['blockquote', 'q', 'cite', 'pre', 'code', 'table'])
+def test_subscription_like_forms_in_quoted_code_or_tables_are_preserved(container):
+    widget = '<div class="subscribe-widget" data-component-name="SubscribeWidget"><form><input type="email"/><button type="submit">Subscribe</button></form></div>'
+    source = f'<article><h1>Report</h1><{container}>{widget}</{container}><p>Article prose.</p></article>'
+    assert clean_registration_cards(source) == (source, {})
+
+
+def test_subscription_language_without_component_or_email_form_is_preserved():
+    source = ('<article><h1>Report</h1><p>Thanks for reading! Please subscribe below.</p>'
+              '<div class="subscribe-widget"><form><input type="text"/><button type="submit">Send</button></form></div>'
+              '<p>By subscribing, you will join readers who support this publication.</p></article>')
+    assert clean_registration_cards(source) == (source, {})
+
+
+def test_only_directly_adjacent_cta_paragraphs_are_removed():
+    widget = '<div class="subscribe-widget" data-component-name="SubscribeWidget"><form><input type="email"/><button type="submit">Subscribe</button></form></div>'
+    source = ('<article><h1>Report</h1><p><strong>Thanks for reading! Subscribe below.</strong></p>'
+              '<figure><img src="chart.png"/><figcaption>Subscription growth by year.</figcaption></figure>'
+              +widget+
+              '<p><strong>Subscriptions are the publication’s business model.</strong></p>'
+              '<p>A citation links to <a href="https://example.com/subscribe">the subscription terms</a>.</p>'
+              '</article>')
+    cleaned, receipt = clean_registration_cards(source)
+    assert 'Thanks for reading' in cleaned  # A figure separates this CTA-like text from the form.
+    assert 'Subscription growth by year.' in cleaned
+    assert 'Subscriptions are the publication’s business model.' in cleaned
+    assert 'https://example.com/subscribe' in cleaned
+    assert [row['rule'] for row in receipt['removals']] == ['email_signup_subscription_component']
+
+
+def test_marked_wrapper_with_editorial_content_keeps_content_and_removes_only_inner_widget():
+    source = ('''<article><h1>Report</h1><div class="subscription-widget-wrap">
+<div class="preamble">Editorial note.<p>Thanks for reading! To receive more new posts, consider subscribing!.</p></div>
+<p>The publication's subscription business model changed after the 2024 price increase.</p>
+<h2>Subscription revenue changes</h2>
+<figure><img src="chart.png"/><figcaption>Subscription revenue by year.</figcaption></figure>
+<pre><code>signup.submit(email)</code></pre>
+<div class="subscribe-widget" data-component-name="SubscribeWidget"><form><input type="email"/><button type="submit">Subscribe</button></form></div>
+</div></article>''')
+
+    cleaned, receipt = clean_registration_cards(source)
+    assert 'subscription-widget-wrap' in cleaned
+    assert 'Thanks for reading' not in cleaned
+    assert 'Editorial note.' in cleaned
+    assert "subscription business model changed" in cleaned
+    assert 'Subscription revenue changes' in cleaned
+    assert 'Subscription revenue by year.' in cleaned
+    assert 'signup.submit(email)' in cleaned
+    assert 'type="email"' not in cleaned
+    assert [row['rule'] for row in receipt['removals']] == [
+        'subscription_preamble_promotion_paragraph', 'email_signup_subscription_component',
+    ]
+
+
+def test_marked_component_with_its_own_editorial_content_is_preserved():
+    widget = ('<div class="subscribe-widget" data-component-name="SubscribeWidget">'
+              '<p>The article discusses subscription business models.</p>'
+              '<blockquote><p>By subscribing, readers fund the newsletter.</p></blockquote>'
+              '<form><input type="email"/><button type="submit">Subscribe</button></form></div>')
+    source = '<article><h1>Report</h1>'+widget+'</article>'
+    assert clean_registration_cards(source) == (source, {})
+
+
+@pytest.mark.parametrize('container', ['blockquote', 'q', 'cite', 'pre', 'code', 'table', 'figure'])
+def test_unsafe_wrapper_keeps_preamble_cta_inside_editorial_ancestor(container):
+    widget = ('<div class="subscribe-widget" data-component-name="SubscribeWidget">'
+              '<form><input type="email"/><button type="submit">Subscribe</button></form></div>')
+    source = (f'<article><h1>Report</h1><div class="subscription-widget-wrap">'
+              f'<{container}><div class="preamble"><p><strong>'
+              'By subscribing, you will join over 80,000 people who read this newsletter!'
+              f'</strong></p></div></{container}>{widget}</div></article>')
+    cleaned, receipt = clean_registration_cards(source)
+    assert 'By subscribing, you will join over 80,000 people who read this newsletter!' in cleaned
+    assert 'type="email"' not in cleaned
+    assert [row['rule'] for row in receipt['removals']] == ['email_signup_subscription_component']
+
+
+@pytest.mark.parametrize('paragraph', [
+    '<p><strong>By subscribing, you will join over 80,000 readers!</strong> The article questions the data.</p>',
+    '<p><strong>The author wrote “Thanks for reading! If you haven’t subscribed, click the button below.”</strong></p>',
+    '<p><strong>By subscribing, readers can compare several competing business models.</strong></p>',
+])
+def test_cta_words_inside_editorial_paragraph_do_not_remove_mixed_or_quoted_text(paragraph):
+    widget = '<div class="subscribe-widget" data-component-name="SubscribeWidget"><form><input type="email"/><button type="submit">Subscribe</button></form></div>'
+    source = '<article><h1>Report</h1>'+paragraph+widget+'<p>Following paragraph.</p></article>'
+    cleaned, receipt = clean_registration_cards(source)
+    assert paragraph in cleaned
+    assert 'type="email"' not in cleaned
+    assert [row['rule'] for row in receipt['removals']] == ['email_signup_subscription_component']
+
+
+def test_shared_adjacent_cta_is_removed_and_recorded_once_for_two_components():
+    widget = '<div class="subscribe-widget" data-component-name="SubscribeWidget"><form><input type="email"/><button type="submit">Subscribe</button></form></div>'
+    cta = '<p><strong>By subscribing, you will join over 80,000 people who read this newsletter!</strong></p>'
+    source = '<article><h1>Report</h1>'+widget+cta+widget+'</article>'
+    cleaned, receipt = clean_registration_cards(source)
+    assert '80,000' not in cleaned
+    assert sum(row['rule'] == 'adjacent_subscription_promotion_paragraph' for row in receipt['removals']) == 1
+    assert sum(row['rule'] == 'email_signup_subscription_component' for row in receipt['removals']) == 2
 
 
 def test_extraction_keeps_tables_and_has_no_implicit_precision_switch():
@@ -254,3 +407,12 @@ def test_rss_forwards_article_content_receipt_and_recovered_body():
                                               datetime.now(timezone.utc)))
     assert item.content.startswith('Gamow Labs builds')
     assert item.metadata['content_extraction']['html_cleaning']['article_content']['adjustments']
+
+
+def test_adjacent_promotion_prefix_does_not_remove_an_additional_reporting_sentence():
+    widget = '<div class="subscribe-widget" data-component-name="SubscribeWidget"><form><input type="email"/><button type="submit">Subscribe</button></form></div>'
+    prose = '<p><strong>By subscribing, you will join our readers. The report explains a decline in newsletter revenue.</strong></p>'
+    source = '<article><h1>Report</h1>'+widget+prose+'</article>'
+    cleaned, _ = clean_registration_cards(source)
+    assert 'The report explains a decline in newsletter revenue.' in cleaned
+    assert 'By subscribing, you will join our readers.' in cleaned

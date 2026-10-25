@@ -1,10 +1,105 @@
 """Conservative DOM boundaries and component handling for article extraction."""
 
 import hashlib
+import re
 from copy import deepcopy
 from urllib.parse import urlsplit
 
 from lxml import html as lxml_html
+
+
+SUBSCRIBE_PROMO_PATTERNS = (
+    re.compile(r"^thanks\s+for\s+reading!\s+(?:if\s+you\s+haven['’]t\s+subscribed,\s*"
+               r"(?:please\s+)?click\s+(?:the\s+)?(?:button|link)\s+below:?|"
+               r"to\s+receive\s+[^.!?]+,\s*consider\s+subscribing)[!.]*$", re.IGNORECASE),
+    re.compile(r"^by\s+subscribing,\s*(?:you(?:['’]ll|\s+will)\s+)?"
+               r"(?:join|receive)\s+[^.!?]+(?:readers|people\s+who\s+read\s+[^.!?]+|new\s+posts|updates|newsletter)[.!]$",
+               re.IGNORECASE),
+)
+EDITORIAL_STRUCTURES = (".//blockquote|.//q|.//cite|.//pre|.//code|.//table|.//figure|.//article|"
+                        ".//h1|.//h2|.//h3|.//h4|.//h5|.//h6")
+
+
+def _has_email_signup_form(node) -> bool:
+    return bool(node.xpath(
+        ".//form[.//input[translate(@type, 'EMAIL', 'email')='email'] "
+        "and (.//button[translate(@type, 'SUBMIT', 'submit')='submit'] "
+        "or .//input[translate(@type, 'SUBMIT', 'submit')='submit'])]"
+    ))
+
+
+def _is_subscription_component(node) -> bool:
+    if not isinstance(node.tag, str):
+        return False
+    classes = set((node.get("class") or "").split())
+    marked = (node.get("data-component-name") == "SubscribeWidget"
+              or classes.intersection({"subscribe-widget", "subscription-widget",
+                                       "subscription-widget-wrap"}))
+    return bool(marked and _has_email_signup_form(node)
+                and not node.xpath("ancestor::blockquote|ancestor::q|ancestor::cite|ancestor::pre|ancestor::code|ancestor::table|ancestor::figure"))
+
+
+def _safe_subscription_component(node) -> bool:
+    """Refuse to remove a marked container that also carries article material."""
+    if node.xpath(EDITORIAL_STRUCTURES):
+        return False
+    forms = set(node.xpath(".//form"))
+    preambles = [candidate for candidate in node.iter()
+                 if isinstance(candidate.tag, str)
+                 and "preamble" in (candidate.get("class") or "").split()]
+    promo_paragraphs = [paragraph for paragraph in node.xpath(".//p")
+                        if any(ancestor in preambles for ancestor in paragraph.iterancestors())
+                        and _is_preamble_promotion(paragraph)]
+    for paragraph in node.xpath(".//p"):
+        if not any(ancestor in preambles for ancestor in paragraph.iterancestors()):
+            return False
+        if not _is_preamble_promotion(paragraph):
+            return False
+    for element in node.iter():
+        if not isinstance(element.tag, str):
+            continue
+        if (element.text or "").strip():
+            if not any(form is element or form in element.iterancestors() for form in forms):
+                if not any(paragraph is element or paragraph in element.iterancestors()
+                           for paragraph in promo_paragraphs):
+                    return False
+        if (element.tail or "").strip():
+            parent = element.getparent()
+            if parent is not None and not any(form is parent or form in parent.iterancestors()
+                                              for form in forms):
+                if not any(paragraph is parent or paragraph in parent.iterancestors()
+                           for paragraph in promo_paragraphs):
+                    return False
+    return True
+
+
+def _is_explicit_subscription_promotion(node) -> bool:
+    if (node.tag != "p"
+            or node.xpath(".//pre|.//code|.//blockquote|.//q|.//cite")
+            or node.xpath("ancestor::blockquote|ancestor::q|ancestor::cite|ancestor::pre|ancestor::code|ancestor::table|ancestor::figure")):
+        return False
+    text = " ".join(node.text_content().split())
+    emphasized = [child for child in node.xpath(".//strong|.//b")
+                  if " ".join(child.text_content().split()) == text]
+    return bool(text and emphasized and _matches_subscription_promotion(text))
+
+
+def _matches_subscription_promotion(text: str) -> bool:
+    return any(pattern.fullmatch(text) for pattern in SUBSCRIBE_PROMO_PATTERNS)
+
+
+def _is_preamble_promotion(node) -> bool:
+    if (node.tag != "p"
+            or node.xpath(".//pre|.//code|.//blockquote|.//q|.//cite")
+            or node.xpath("ancestor::blockquote|ancestor::q|ancestor::cite|ancestor::pre|ancestor::code|ancestor::table|ancestor::figure")):
+        return False
+    return _matches_subscription_promotion(" ".join(node.text_content().split()))
+
+
+def _node_proof(node, xpath: str, rule: str, **extra) -> dict:
+    serialized = lxml_html.tostring(node, encoding="unicode", with_tail=False)
+    return {"rule": rule, "xpath": xpath, "text": node.text_content(),
+            "serialized_html": serialized, **extra}
 
 
 def prepare_article_content(source: str, extracted_text: str = '') -> tuple[str, dict]:
@@ -79,14 +174,85 @@ def prepare_article_content(source: str, extracted_text: str = '') -> tuple[str,
 
 
 def clean_registration_cards(source: str) -> tuple[str, dict]:
-    """Use Readability only as a protection boundary, never as replacement text.
+    """Remove proven signup UI and standalone cards without rewriting prose.
 
     Return original HTML unchanged when no independently identified card is
-    removed. In particular, tables and intro text outside Readability survive.
+    removed. Subscription components may occur inside article bodies, so they
+    are identified by their component marker plus a working email signup form.
+    Only adjacent paragraphs with explicit subscribe-call language are included.
     """
     from trafilatura.readability_lxml import Document
 
     tree = lxml_html.fromstring(source)
+    original_paths = {node: tree.getroottree().getpath(node) for node in tree.iter()
+                      if isinstance(node.tag, str)}
+    removals = []
+
+    # Substack-style inline forms are sometimes emitted inside the extracted
+    # article body. Require both a component marker and an email/submit form;
+    # ignore examples and quotations where form-like markup is editorial.
+    marked = [node for node in tree.iter() if _is_subscription_component(node)]
+    safe_marked = [node for node in marked if _safe_subscription_component(node)]
+    components = [node for node in safe_marked
+                  if not any(ancestor in safe_marked for ancestor in node.iterancestors())]
+    subscription_nodes = set()
+    recorded_promotion_paragraphs = set()
+    for component in marked:
+        if component in safe_marked:
+            continue
+        classes = set((component.get("class") or "").split())
+        if not classes.intersection({"subscription-widget", "subscription-widget-wrap"}):
+            continue
+        for paragraph in component.xpath(
+                ".//*[contains(concat(' ',normalize-space(@class),' '),' preamble ')]//p"):
+            if paragraph in recorded_promotion_paragraphs or not _is_preamble_promotion(paragraph):
+                continue
+            promo_text = " ".join(paragraph.text_content().split())
+            matched = next(pattern.fullmatch(promo_text) for pattern in SUBSCRIBE_PROMO_PATTERNS
+                           if pattern.fullmatch(promo_text))
+            removals.append(_node_proof(
+                paragraph, original_paths.get(paragraph, ""),
+                "subscription_preamble_promotion_paragraph",
+                component_xpath=original_paths[component],
+                evidence="full subscribe call-to-action inside a preamble component",
+                matched_text=matched.group(0),
+            ))
+            recorded_promotion_paragraphs.add(paragraph)
+            subscription_nodes.add(paragraph)
+    for component in components:
+        component_path = original_paths[component]
+        adjacent = []
+        for direction in ("getprevious", "getnext"):
+            sibling = getattr(component, direction)()
+            while sibling is not None and not isinstance(sibling.tag, str):
+                sibling = getattr(sibling, direction)()
+            if sibling is not None and _is_explicit_subscription_promotion(sibling):
+                adjacent.append(sibling)
+        for paragraph in adjacent:
+            if paragraph not in recorded_promotion_paragraphs:
+                promo_text = " ".join(paragraph.text_content().split())
+                matched = next(pattern.fullmatch(promo_text) for pattern in SUBSCRIBE_PROMO_PATTERNS
+                               if pattern.fullmatch(promo_text))
+                removals.append(_node_proof(
+                    paragraph, original_paths.get(paragraph, ""),
+                    "adjacent_subscription_promotion_paragraph",
+                    component_xpath=component_path,
+                    evidence="full emphasized subscribe call-to-action paragraph",
+                    matched_text=matched.group(0),
+                ))
+                recorded_promotion_paragraphs.add(paragraph)
+            subscription_nodes.add(paragraph)
+        removals.append(_node_proof(
+            component, component_path, "email_signup_subscription_component",
+            evidence={"component_marker": component.get("data-component-name") or
+                      sorted(set((component.get("class") or "").split()).intersection(
+                          {"subscribe-widget", "subscription-widget", "subscription-widget-wrap"})),
+                      "email_input": True, "submit_control": True},
+        ))
+        subscription_nodes.add(component)
+    for node in sorted(subscription_nodes, key=lambda n: len(list(n.iterancestors())), reverse=True):
+        node.drop_tree()
+
     attribute = "data-horizon-cleaning-node"
     originals = {}
     for index, node in enumerate(tree.iter()):
@@ -96,9 +262,18 @@ def clean_registration_cards(source: str) -> tuple[str, dict]:
     selected = lxml_html.fromstring(Document(deepcopy(tree)).summary())
     kept = set(selected.xpath(f"//@{attribute}"))
     if not kept:
-        return source, {}
+        for node, value in originals.items():
+            if value is None:
+                node.attrib.pop(attribute, None)
+            else:
+                node.set(attribute, value)
+        if not removals:
+            return source, {}
+        cleaned = lxml_html.tostring(tree, encoding="unicode")
+        return cleaned, {"input_sha256": hashlib.sha256(source.encode()).hexdigest(),
+                         "output_sha256": hashlib.sha256(cleaned.encode()).hexdigest(),
+                         "removals": removals}
 
-    removals = []
     links = [(link, tree.getroottree().getpath(link.getparent()))
              for link in tree.xpath("//a[@href]")]
     for link, original_path in links:
@@ -131,13 +306,9 @@ def clean_registration_cards(source: str) -> tuple[str, dict]:
         snapshot = deepcopy(card)
         for node in snapshot.iter():
             node.attrib.pop(attribute, None)
-        removals.append({
-            "rule": "standalone_registration_card_outside_main_content",
-            "xpath": original_path,
-            "text": card.text_content(),
-            "target": link.get("href"),
-            "serialized_html": lxml_html.tostring(snapshot, encoding="unicode", with_tail=False),
-        })
+        removals.append(_node_proof(snapshot, original_paths.get(card, original_path),
+                                    "standalone_registration_card_outside_main_content",
+                                    target=link.get("href")))
         card.drop_tree()
 
     if not removals:
