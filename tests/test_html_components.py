@@ -320,6 +320,144 @@ def test_non_navigation_details_and_article_prose_are_preserved():
     assert clean_article_opening(text, source)[0] == text.split('\n',1)[1]
 
 
+NEWSLETTER_PROMO = (
+    'This is The Field Notes, a weekly newsletter breaking down one story from technology. '
+    'For more about its impact, follow Alex Example. '
+    'The Field Notes arrives in our subscribers’ inboxes on Sunday at 8AM. '
+    'Opt in for The Field Notes here.'
+)
+
+
+def newsletter_paragraph(text=NEWSLETTER_PROMO, target='/newsletters'):
+    return '<p><em>'+text.replace('here.', f'<a href="{target}">here</a>.')+'</em></p>'
+
+
+def test_plain_newsletter_preamble_uses_dom_proof_and_preserves_every_other_character():
+    from src.extractors.html_components import clean_newsletter_preambles
+    body = 'Real reporting begins here.\nA section heading\nThe complete evidence remains.'
+    source = '<article><h1>Report</h1>'+newsletter_paragraph()+'<p>Real reporting begins here.</p></article>'
+    text = NEWSLETTER_PROMO+'\n'+body
+    cleaned, proof = clean_newsletter_preambles(text, source)
+    assert cleaned == body
+    removal = proof['removals'][0]
+    assert text[removal['start']:removal['end']] == removal['text']
+    assert removal['target'] == '/newsletters'
+    assert '<em>' in removal['serialized_html']
+    assert clean_newsletter_preambles(cleaned, source) == (cleaned, {})
+    assert clean_registration_cards(source) == (source, {})
+
+
+@pytest.mark.parametrize('source', [
+    '<article>'+newsletter_paragraph(NEWSLETTER_PROMO+' The publisher was acquired yesterday.')+'</article>',
+    '<article><blockquote>'+newsletter_paragraph()+'</blockquote></article>',
+    '<article><q>'+newsletter_paragraph()+'</q></article>',
+    '<article><pre>'+newsletter_paragraph()+'</pre></article>',
+    '<article><table><tr><td>'+newsletter_paragraph()+'</td></tr></table></article>',
+    '<article>'+newsletter_paragraph(target='/report')+'</article>',
+    '<article><p>The report explains how newsletters arrive in subscriber inboxes.</p></article>',
+    '<article><p><em>Subscribe to our newsletter here.</em> A new study found traffic declined.</p></article>',
+])
+def test_plain_newsletter_reporting_quotes_and_uncertain_structure_are_preserved(source):
+    from src.extractors.html_components import clean_newsletter_preambles
+    text = NEWSLETTER_PROMO+'\nReporting remains.'
+    assert clean_newsletter_preambles(text, source) == (text, {})
+
+
+def test_same_newsletter_words_in_list_content_are_not_assigned_to_missing_ui_copies():
+    from src.extractors.html_components import clean_newsletter_preambles
+    source = '<article>'+newsletter_paragraph()*2+'<ul><li>'+NEWSLETTER_PROMO+'</li></ul></article>'
+    text = NEWSLETTER_PROMO+'\n'+NEWSLETTER_PROMO+'\nReporting remains.'
+    assert clean_newsletter_preambles(text, source) == (text, {})
+
+
+def test_repeated_header_copies_anywhere_keep_one_standfirst_and_all_body_headings():
+    from src.extractors.html_components import clean_article_opening
+    header = '<div><h1>Page headline</h1><p>A distinct standfirst.</p></div>'
+    source = '<article>'+header+header+'<h2>First section</h2><p>Body remains.</p></article>'
+    text = 'An actual introduction.\nPage headline\nA distinct standfirst.\nPage headline\nA distinct standfirst.\nFirst section\nBody remains.'
+    cleaned, proof = clean_article_opening(text, source)
+    assert cleaned == 'An actual introduction.\nA distinct standfirst.\nFirst section\nBody remains.'
+    for row in proof['removals']:
+        assert text[row['start']:row['end']] == row['text']
+    restored = text
+    for row in reversed(proof['removals']):
+        restored = restored[:row['start']]+restored[row['end']:]
+    assert cleaned == restored
+    assert clean_article_opening(cleaned, source) == (cleaned, {})
+
+
+def test_sole_isolated_page_heading_after_intro_is_removed_without_losing_standfirst():
+    from src.extractors.html_components import clean_article_opening
+    source = '<article><div><h1>Page headline</h1><p>A distinct standfirst.</p></div><p>Actual introduction.</p></article>'
+    text = 'Actual introduction.\nPage headline\nA distinct standfirst.'
+    cleaned, proof = clean_article_opening(text, source)
+    assert cleaned == 'Actual introduction.\nA distinct standfirst.'
+    assert len(proof['removals']) == 1
+
+
+def test_responsive_standfirst_outside_h1_wrapper_needs_shared_header_marker():
+    from src.extractors.html_components import clean_article_opening
+    source = ('<article><header><div><h1>Page headline</h1><p>A distinct standfirst.</p></div>'
+              '<div><p>A distinct standfirst.</p></div></header><p>Actual introduction.</p></article>')
+    text = 'Actual introduction.\nPage headline\nA distinct standfirst.\nA distinct standfirst.'
+    assert clean_article_opening(text, source)[0] == 'Actual introduction.\nA distinct standfirst.\n'
+    uncertain = source.replace('<header>', '<section>').replace('</header>', '</section>')
+    assert clean_article_opening(text, uncertain)[0] == 'Actual introduction.\nA distinct standfirst.\nA distinct standfirst.'
+    with_body_copy = source.replace('</article>', '<ul><li>A distinct standfirst.</li></ul></article>')
+    assert clean_article_opening(text, with_body_copy)[0] == 'Actual introduction.\nA distinct standfirst.\nA distinct standfirst.'
+
+
+@pytest.mark.parametrize('source', [
+    '<article><div><h1>Headline</h1><p>One lead.</p></div><div><h1>Headline</h1><p>Another lead.</p></div></article>',
+    '<article><div><h1>Headline</h1><p>One lead.</p><p>Extra reporting.</p></div><div><h1>Headline</h1><p>One lead.</p></div></article>',
+    '<article><div><h1>Headline</h1><p>One lead.</p></div><div><h1>Headline</h1><p>One lead.</p></div><blockquote>Headline</blockquote></article>',
+])
+def test_different_or_mixed_headers_and_independent_quotes_are_preserved(source):
+    from src.extractors.html_components import clean_article_opening
+    text = 'Introduction.\nHeadline\nOne lead.\nHeadline\nOne lead.\nBody remains.'
+    assert clean_article_opening(text, source) == (text, {})
+
+
+def test_marked_product_listing_keeps_description_pricing_and_maker_evidence():
+    from src.extractors.html_components import clean_product_listing_components
+    source = '''<main><div data-test="header"><div>Launching today</div><h1>Example Product</h1>
+<h2>A workspace for people and agents</h2><p>213 followers</p>
+<h2>A workspace for people and agents</h2><p>213 followers</p>
+<a data-test="visit-website-button" href="https://product.example">Visit</a>
+<a data-test="product-navigation-item-overview" href="/overview">Overview</a>
+<p>The product supports shared documents and version history.</p></div>
+<div data-test="launch"><div>Launch Team</div><div><img alt="Other service"/>
+<span>Other service</span><span>Get credits</span><button>Try it</button><span>Promoted</span></div>
+<p>Free Options</p><p>The maker explained a concrete workflow.</p></div></main>'''
+    text = ('Launching today\nExample Product\nA workspace for people and agents\n213 followers\n'
+            'A workspace for people and agents\n213 followers\n'
+            'The product supports shared documents and version history.\nFree Options\n'
+            'Launch Team\nOther serviceGet credits\nPromoted\nThe maker explained a concrete workflow.')
+    cleaned, proof = clean_product_listing_components(text, source)
+    assert cleaned == ('The product supports shared documents and version history.\nFree Options\n'
+                       'The maker explained a concrete workflow.')
+    result = text
+    for removal in reversed(proof['removals']):
+        assert result[removal['start']:removal['end']] == removal['text']
+        result = result[:removal['start']]+result[removal['end']:]
+    assert result == cleaned
+    assert clean_product_listing_components(cleaned, source) == (cleaned, {})
+    assert clean_product_listing_components(text, source.replace('data-test=', 'data-example=')) == (text, {})
+    quoted = source.replace('<main>', '<main><blockquote>').replace('</main>', '</blockquote></main>')
+    assert clean_product_listing_components(text, quoted) == (text, {})
+    same_description = source.replace('The product supports shared documents and version history.',
+                                      'A workspace for people and agents')
+    input_text = text.replace('The product supports shared documents and version history.',
+                              'A workspace for people and agents')
+    result, _ = clean_product_listing_components(input_text, same_description)
+    assert result.count('A workspace for people and agents') == 3
+    collapsed = input_text.replace('A workspace for people and agents\n213 followers\n', '', 1)
+    result, _ = clean_product_listing_components(collapsed, same_description)
+    assert result.count('A workspace for people and agents') == 2
+    ambiguous_ad = source.replace('</main>', '<p>Other serviceGet credits</p></main>')
+    assert 'Other serviceGet credits' in clean_product_listing_components(text, ambiguous_ad)[0]
+
+
 def test_extractor_trims_primary_heading_but_keeps_original_body():
     source = '<html><body><article>'+STORY+'</article></body></html>'
     expected = trafilatura.extract(source).split('\n',1)[1]

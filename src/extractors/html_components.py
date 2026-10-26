@@ -16,6 +16,14 @@ SUBSCRIBE_PROMO_PATTERNS = (
                r"(?:join|receive)\s+[^.!?]+(?:readers|people\s+who\s+read\s+[^.!?]+|new\s+posts|updates|newsletter)[.!]$",
                re.IGNORECASE),
 )
+NEWSLETTER_PREAMBLE = re.compile(
+    r"^This\s+is\s+[^.!?]+,\s+(?:a|our)\s+[^.!?]*\bnewsletter\b[^.!?]*[.!]\s+"
+    r"(?:For\s+more\s+[^.!?]+,\s+follow\s+[^.!?]+[.!]\s+)?"
+    r"[^.!?]+\s+(?:arrives?|lands?|is\s+delivered)\s+in\s+(?:our\s+)?"
+    r"subscribers?['’]?\s+inboxes?\s+[^.!?]+[.!]\s+"
+    r"(?:Opt\s+in|Sign\s+up|Subscribe)\s+(?:for|to)\s+[^.!?]+[.!]$",
+    re.IGNORECASE,
+)
 EDITORIAL_STRUCTURES = (".//blockquote|.//q|.//cite|.//pre|.//code|.//table|.//figure|.//article|"
                         ".//h1|.//h2|.//h3|.//h4|.//h5|.//h6")
 
@@ -100,6 +108,156 @@ def _node_proof(node, xpath: str, rule: str, **extra) -> dict:
     serialized = lxml_html.tostring(node, encoding="unicode", with_tail=False)
     return {"rule": rule, "xpath": xpath, "text": node.text_content(),
             "serialized_html": serialized, **extra}
+
+
+def _has_unowned_text_copy(tree, value, owned):
+    """A matching prose/list/heading block outside the proven component is ambiguous."""
+    blocks = tree.xpath('.//p|.//h1|.//h2|.//h3|.//h4|.//h5|.//h6|.//li|.//blockquote|.//q|.//cite|.//pre|.//code|'
+                        './/div[not(.//a or .//button)]')
+    for node in blocks:
+        if ' '.join(node.text_content().split()) != value:
+            continue
+        if (node.xpath('ancestor::a|.//a')
+                and not ''.join(node.xpath('.//text()[not(ancestor::a)]')).strip()):
+            continue  # A related-story link is not an independent prose copy.
+        if not any(node is candidate or node in candidate.iterancestors()
+                   or candidate in node.iterancestors() for candidate in owned):
+            return True
+    return False
+
+
+def _newsletter_promotion_link(node):
+    """Recognize a complete publisher preamble, never a mixed reporting paragraph."""
+    if (node.tag != 'p' or not node.xpath('.//em|.//i')
+            or node.xpath(EDITORIAL_STRUCTURES)
+            or node.xpath('ancestor::blockquote|ancestor::q|ancestor::cite|ancestor::pre|'
+                          'ancestor::code|ancestor::table|ancestor::figure')):
+        return None
+    text = ' '.join(node.text_content().split())
+    if not NEWSLETTER_PREAMBLE.fullmatch(text):
+        return None
+    links = node.xpath('.//a[@href]')
+    if not links:
+        return None
+    link = links[-1]
+    try:
+        target = urlsplit(link.get('href'))
+    except ValueError:
+        return None
+    if (target.scheme not in {'', 'http', 'https'}
+            or target.path.rstrip('/').lower().split('/')[-1]
+            not in {'newsletters', 'newsletter', 'subscribe', 'signup', 'sign-up'}
+            or not ' '.join(link.text_content().split())):
+        return None
+    return link.get('href')
+
+
+def clean_newsletter_preambles(text: str, source: str) -> tuple[str, dict]:
+    """Remove complete DOM-proven promotion lines without changing body selection."""
+    tree = lxml_html.fromstring(source)
+    candidates = {}
+    for paragraph in tree.xpath('//p'):
+        target = _newsletter_promotion_link(paragraph)
+        if target:
+            value = ' '.join(paragraph.text_content().split())
+            candidates.setdefault(value, []).append((paragraph, target))
+    lines = text.splitlines(keepends=True)
+    for value in list(candidates):
+        if (sum(' '.join(line.split()) == value for line in lines) != len(candidates[value])
+                or _has_unowned_text_copy(tree, value, [node for node, _ in candidates[value]])):
+            del candidates[value]  # Do not confuse an independent quotation with UI.
+    offset, kept, removals = 0, [], []
+    for line in lines:
+        matches = candidates.get(' '.join(line.split()))
+        if matches:
+            node, target = matches.pop(0)
+            removals.append(_node_proof(
+                node, tree.getroottree().getpath(node), 'standalone_newsletter_promotion_paragraph',
+                start=offset, end=offset+len(line), text=line, target=target,
+            ))
+        else:
+            kept.append(line)
+        offset += len(line)
+    cleaned = ''.join(kept)
+    if not removals or not cleaned.strip():
+        return text, {}
+    return cleaned, {'input_sha256': hashlib.sha256(text.encode()).hexdigest(),
+                     'output_sha256': hashlib.sha256(cleaned.encode()).hexdigest(),
+                     'removals': removals}
+
+
+def clean_product_listing_components(text: str, source: str) -> tuple[str, dict]:
+    """Remove proven listing chrome from text without changing body extraction."""
+    tree = lxml_html.fromstring(source)
+    headers = tree.xpath('//main//*[@data-test="header"][.//a[@data-test="visit-website-button"]'
+                         ' and .//a[@data-test="product-navigation-item-overview"]]')
+    launches = tree.xpath('//main//*[@data-test="launch"]')
+    if len(headers) != 1 or len(launches) != 1:
+        return text, {}
+    header, launch = headers[0], launches[0]
+    protected = ('ancestor::blockquote|ancestor::q|ancestor::cite|ancestor::pre|'
+                 'ancestor::code|ancestor::table|ancestor::figure')
+    if header.xpath(protected) or launch.xpath(protected):
+        return text, {}
+    titles, taglines = header.xpath('.//h1'), header.xpath('.//h2')
+    if len(titles) != 1 or not taglines or len({' '.join(n.text_content().split()) for n in taglines}) != 1:
+        return text, {}
+    prefix_nodes = [*titles, *taglines,
+                    *[p for p in header.xpath('.//p')
+                      if re.fullmatch(r'[\d,.]+\s+followers?', ' '.join(p.text_content().split()), re.I)],
+                    *header.xpath('.//div[not(*) and normalize-space(text())="Launching today"]')]
+    prefix = {}
+    for node in prefix_nodes:
+        prefix.setdefault(' '.join(node.text_content().split()), []).append(node)
+    ambiguous_prefix = {value for value in prefix if _has_unowned_text_copy(tree, value, prefix[value])}
+    controls = {}
+    for node in launch.xpath('.//div[not(*) and normalize-space(text())="Launch Team"]'):
+        if not node.xpath(protected):
+            controls[' '.join(node.text_content().split())] = (node, 'product_listing_team_control')
+    for label in launch.xpath('.//span[normalize-space(text())="Promoted"]'):
+        if label.xpath(protected):
+            continue
+        for card in label.iterancestors():
+            if card is launch:
+                break
+            if (len(card.xpath('.//img[@alt]')) == 1 and len(card.xpath('.//button')) == 1
+                    and not card.xpath(EDITORIAL_STRUCTURES)):
+                snapshot = deepcopy(card)
+                for node in snapshot.xpath('.//button|.//span[normalize-space(text())="Promoted"]'):
+                    node.drop_tree()
+                value = ' '.join(snapshot.text_content().split())
+                if value:
+                    controls[value] = (card, 'marked_product_listing_promotion')
+                    controls['Promoted'] = (label, 'product_listing_promotion_label')
+                break
+    lines = text.splitlines(keepends=True)
+    controls = {value: row for value, row in controls.items()
+                if sum(' '.join(line.split()) == value for line in lines) == 1
+                and not _has_unowned_text_copy(tree, value, [row[0]])}
+    offset, in_prefix, kept, removals = 0, True, [], []
+    for line in lines:
+        value = ' '.join(line.split())
+        candidates = prefix.get(value) if in_prefix else None
+        if candidates:
+            node, rule = candidates.pop(0), 'product_listing_identity_control'
+            if value in ambiguous_prefix:
+                node = None
+        else:
+            if value:
+                in_prefix = False
+            node, rule = controls.get(value, (None, None))
+        if node is None:
+            kept.append(line)
+        else:
+            removals.append(_node_proof(node, tree.getroottree().getpath(node), rule,
+                                       start=offset, end=offset+len(line), text=line))
+        offset += len(line)
+    cleaned = ''.join(kept)
+    if not removals or not cleaned.strip():
+        return text, {}
+    return cleaned, {'input_sha256': hashlib.sha256(text.encode()).hexdigest(),
+                     'output_sha256': hashlib.sha256(cleaned.encode()).hexdigest(),
+                     'removals': removals}
 
 
 def prepare_article_content(source: str, extracted_text: str = '') -> tuple[str, dict]:
@@ -326,8 +484,86 @@ def clean_registration_cards(source: str) -> tuple[str, dict]:
     }
 
 
+def _clean_isolated_article_headers(text, tree, article, headings):
+    """Remove page headings only when every H1 has the same isolated header.
+
+    Work on the extractor's text so pruning a header cannot change its body
+    selector or silently drop section headings. Retain the first standfirst.
+    """
+    parents = [heading.getparent() for heading in headings]
+    if len(set(parents)) != len(headings) or len({len(list(p.iterancestors())) for p in parents}) != 1:
+        return text, {}
+    signatures, standfirsts = [], []
+    for parent in parents:
+        children = [n for n in parent if isinstance(n.tag, str)]
+        if ([n.tag for n in children] != ['h1', 'p'] or (parent.text or '').strip()
+                or any((n.tail or '').strip() for n in children)
+                or children[1].xpath(EDITORIAL_STRUCTURES)):
+            return text, {}
+        signatures.append(tuple(' '.join(n.text_content().split()) for n in children))
+        standfirsts.append(children[1])
+    if len(set(signatures)) != 1 or not all(signatures[0]) or signatures[0][0] == signatures[0][1]:
+        return text, {}
+    title, subtitle = signatures[0]
+    header_containers = [next((node for node in heading.iterancestors()
+                               if article in node.iterancestors() and
+                               (node.tag == 'header' or node.get('data-component-name') == 'ArticleHeader'
+                                or 'duet--article--lede' in (node.get('class') or '').split())), None)
+                         for heading in headings]
+    if header_containers[0] is not None and len(set(header_containers)) == 1:
+        # A responsive standfirst can be outside the H1's immediate wrapper,
+        # while still belonging to the same explicitly marked article header.
+        for node in header_containers[0].xpath('.//p'):
+            if (node not in standfirsts and ' '.join(node.text_content().split()) == subtitle
+                    and not node.xpath('ancestor::blockquote|ancestor::q|ancestor::cite|ancestor::pre|'
+                                       'ancestor::code|ancestor::table|ancestor::figure')):
+                standfirsts.append(node)
+    dedupe_subtitle = True
+    for node in article.xpath('.//p|.//blockquote|.//q|.//cite|.//pre|.//code'):
+        if node not in standfirsts:
+            value = ' '.join(node.text_content().split())
+            if value == title:
+                return text, {}  # An independent prose/quote occurrence is ambiguous.
+            if value == subtitle:
+                dedupe_subtitle = False
+    if _has_unowned_text_copy(article, title, headings):
+        return text, {}
+    if _has_unowned_text_copy(article, subtitle, standfirsts):
+        dedupe_subtitle = False
+    lines = text.splitlines(keepends=True)
+    counts = {value: sum(' '.join(line.split()) == value for line in lines)
+              for value in (title, subtitle)}
+    if counts[title] > len(headings):
+        return text, {}
+    dedupe_subtitle = dedupe_subtitle and counts[subtitle] <= len(standfirsts)
+    offset, seen_subtitles, seen_titles = 0, 0, 0
+    kept, removals = [], []
+    for line in lines:
+        value = ' '.join(line.split())
+        node, rule = None, None
+        if value == title:
+            node, rule = headings[seen_titles], 'isolated_article_primary_heading'
+            seen_titles += 1
+        elif value == subtitle:
+            if seen_subtitles and dedupe_subtitle:
+                node, rule = standfirsts[seen_subtitles], 'repeated_article_standfirst'
+            seen_subtitles += 1
+        if node is None:
+            kept.append(line)
+        else:
+            removals.append(_node_proof(node, tree.getroottree().getpath(node), rule,
+                                       start=offset, end=offset+len(line), text=line))
+        offset += len(line)
+    cleaned = ''.join(kept)
+    if not removals or not cleaned.strip():
+        return text, {}
+    return cleaned, {'input_sha256': hashlib.sha256(text.encode()).hexdigest(),
+                     'output_sha256': hashlib.sha256(cleaned.encode()).hexdigest(),
+                     'removals': removals}
+
+
 def clean_article_opening(text: str, source: str) -> tuple[str, dict]:
-    """Trim only a DOM-proven title/TOC prefix, leaving article prose untouched.
+    """Remove DOM-proven page headings, leaving article prose untouched.
 
     A rewritten feed title need not match the page's H1. The sole H1 in an
     explicit article identifies it instead. No fuzzy text or publisher rules.
@@ -337,7 +573,12 @@ def clean_article_opening(text: str, source: str) -> tuple[str, dict]:
     if len(articles) != 1:
         return text, {}
     article = articles[0]
-    headings = article.xpath(".//h1[not(ancestor::blockquote or ancestor::pre or ancestor::code)]")
+    headings = article.xpath(".//h1[not(ancestor::blockquote or ancestor::q or ancestor::cite "
+                             "or ancestor::pre or ancestor::code or ancestor::table or ancestor::figure)]")
+    if headings:
+        cleaned, proof = _clean_isolated_article_headers(text, tree, article, headings)
+        if proof:
+            return cleaned, proof
     if len(headings) != 1:
         return text, {}
     candidates = [(headings[0], "article_primary_heading")]

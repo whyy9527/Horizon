@@ -8,7 +8,9 @@ from typing import Optional
 import httpx
 
 from .base import BaseExtractor
-from .html_components import clean_article_opening, clean_registration_cards, prepare_article_content
+from .html_components import (clean_article_opening, clean_registration_cards,
+                              clean_newsletter_preambles, clean_product_listing_components,
+                              prepare_article_content)
 from ..models import TrafilaturaExtractorConfig
 from ..url_security import UnsafeURLError, safe_request
 
@@ -97,6 +99,12 @@ class TrafilaturaExtractor(BaseExtractor):
             return None, receipt
         if text:
             try:
+                text, listing = clean_product_listing_components(text, html)
+                if listing:
+                    receipt = {**receipt, 'product_listing': listing}
+                text, promotion = clean_newsletter_preambles(text, html)
+                if promotion:
+                    receipt = {**receipt, "newsletter_promotion": promotion}
                 text, opening = clean_article_opening(text, html)
                 if opening:
                     receipt = {**receipt, "article_opening": opening}
