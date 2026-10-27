@@ -110,12 +110,13 @@ def _node_proof(node, xpath: str, rule: str, **extra) -> dict:
             "serialized_html": serialized, **extra}
 
 
-def _has_unowned_text_copy(tree, value, owned):
+def _has_unowned_text_copy(tree, value, owned, normalize=None):
     """A matching prose/list/heading block outside the proven component is ambiguous."""
+    normalize = normalize or (lambda text: ' '.join(text.split()))
     blocks = tree.xpath('.//p|.//h1|.//h2|.//h3|.//h4|.//h5|.//h6|.//li|.//blockquote|.//q|.//cite|.//pre|.//code|'
                         './/div[not(.//a or .//button)]')
     for node in blocks:
-        if ' '.join(node.text_content().split()) != value:
+        if normalize(node.text_content()) != value:
             continue
         if (node.xpath('ancestor::a|.//a')
                 and not ''.join(node.xpath('.//text()[not(ancestor::a)]')).strip()):
@@ -490,6 +491,9 @@ def _clean_isolated_article_headers(text, tree, article, headings):
     Work on the extractor's text so pruning a header cannot change its body
     selector or silently drop section headings. Retain the first standfirst.
     """
+    # Trafilatura strips edge BOMs from CMS text; compare DOM copies the same way.
+    # Keep the original nodes and text spans intact in removal receipts.
+    normalize = lambda value: ' '.join(value.strip(' \t\r\n\ufeff').split())
     parents = [heading.getparent() for heading in headings]
     if len(set(parents)) != len(headings) or len({len(list(p.iterancestors())) for p in parents}) != 1:
         return text, {}
@@ -500,7 +504,7 @@ def _clean_isolated_article_headers(text, tree, article, headings):
                 or any((n.tail or '').strip() for n in children)
                 or children[1].xpath(EDITORIAL_STRUCTURES)):
             return text, {}
-        signatures.append(tuple(' '.join(n.text_content().split()) for n in children))
+        signatures.append(tuple(normalize(n.text_content()) for n in children))
         standfirsts.append(children[1])
     if len(set(signatures)) != 1 or not all(signatures[0]) or signatures[0][0] == signatures[0][1]:
         return text, {}
@@ -514,24 +518,24 @@ def _clean_isolated_article_headers(text, tree, article, headings):
         # A responsive standfirst can be outside the H1's immediate wrapper,
         # while still belonging to the same explicitly marked article header.
         for node in header_containers[0].xpath('.//p'):
-            if (node not in standfirsts and ' '.join(node.text_content().split()) == subtitle
+            if (node not in standfirsts and normalize(node.text_content()) == subtitle
                     and not node.xpath('ancestor::blockquote|ancestor::q|ancestor::cite|ancestor::pre|'
                                        'ancestor::code|ancestor::table|ancestor::figure')):
                 standfirsts.append(node)
     dedupe_subtitle = True
     for node in article.xpath('.//p|.//blockquote|.//q|.//cite|.//pre|.//code'):
         if node not in standfirsts:
-            value = ' '.join(node.text_content().split())
+            value = normalize(node.text_content())
             if value == title:
                 return text, {}  # An independent prose/quote occurrence is ambiguous.
             if value == subtitle:
                 dedupe_subtitle = False
-    if _has_unowned_text_copy(article, title, headings):
+    if _has_unowned_text_copy(article, title, headings, normalize):
         return text, {}
-    if _has_unowned_text_copy(article, subtitle, standfirsts):
+    if _has_unowned_text_copy(article, subtitle, standfirsts, normalize):
         dedupe_subtitle = False
     lines = text.splitlines(keepends=True)
-    counts = {value: sum(' '.join(line.split()) == value for line in lines)
+    counts = {value: sum(normalize(line) == value for line in lines)
               for value in (title, subtitle)}
     if counts[title] > len(headings):
         return text, {}
@@ -539,7 +543,7 @@ def _clean_isolated_article_headers(text, tree, article, headings):
     offset, seen_subtitles, seen_titles = 0, 0, 0
     kept, removals = [], []
     for line in lines:
-        value = ' '.join(line.split())
+        value = normalize(line)
         node, rule = None, None
         if value == title:
             node, rule = headings[seen_titles], 'isolated_article_primary_heading'

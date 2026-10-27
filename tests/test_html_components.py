@@ -554,3 +554,26 @@ def test_adjacent_promotion_prefix_does_not_remove_an_additional_reporting_sente
     cleaned, _ = clean_registration_cards(source)
     assert 'The report explains a decline in newsletter revenue.' in cleaned
     assert 'By subscribing, you will join our readers.' in cleaned
+
+
+@pytest.mark.parametrize('bom', ['\ufeff', ' \ufeff'])
+def test_responsive_header_edge_bom_matches_extractor_without_losing_body(bom):
+    from src.extractors.html_components import clean_article_opening
+    lead = 'The previous reporting established the specific shopping behavior.'
+    source = ('<article><div class="duet--article--lede"><div><h1>Headline</h1><p>'
+              +lead+bom+'</p></div><div><p>'+lead+bom+'</p></div></div>'
+              '<p>All independent reporting remains.</p></article>')
+    text = 'Headline\n'+lead+'\n'+lead+'\nAll independent reporting remains.'
+    cleaned, proof = clean_article_opening(text, source)
+    assert cleaned == lead+'\nAll independent reporting remains.'
+    rebuilt = text
+    for removal in reversed(proof['removals']):
+        assert text[removal['start']:removal['end']] == removal['text']
+        rebuilt = rebuilt[:removal['start']]+rebuilt[removal['end']:]
+    assert rebuilt == cleaned
+    assert any(bom in row['serialized_html'] for row in proof['removals'])
+    # A real body copy, even with an edge BOM, prevents ambiguous text deletion.
+    ambiguous = source.replace('</article>', '<ul><li>'+lead+bom+'</li></ul></article>')
+    assert clean_article_opening(text, ambiguous)[0].count(lead) == 2
+    uncertain = source.replace('duet--article--lede', 'unmarked-wrapper')
+    assert clean_article_opening(text, uncertain)[0].count(lead) == 2
