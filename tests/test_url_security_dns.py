@@ -106,6 +106,28 @@ class ValidationDNSTests(unittest.IsolatedAsyncioTestCase):
             process.kill.assert_called_once()
             process.wait.assert_awaited_once()
 
+    async def test_one_dns_failure_reaps_the_other_process_before_returning(self):
+        started = asyncio.Event()
+
+        async def failure_after_other_query_started():
+            await started.wait()
+            return b";; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 1\n", b""
+
+        async def pending():
+            started.set()
+            await asyncio.Future()
+
+        failed_process = MagicMock(returncode=0)
+        failed_process.communicate = AsyncMock(side_effect=failure_after_other_query_started)
+        pending_process = MagicMock(returncode=None)
+        pending_process.communicate = AsyncMock(side_effect=pending)
+        pending_process.wait = AsyncMock(return_value=-9)
+        with patch("src.url_security.asyncio.create_subprocess_exec", new=AsyncMock(side_effect=[failed_process, pending_process])):
+            with self.assertRaisesRegex(UnsafeURLError, "DNS lookup failed"):
+                await validate_public_http_url("https://example.com/")
+            pending_process.kill.assert_called_once()
+            pending_process.wait.assert_awaited_once()
+
 
 if __name__ == "__main__":
     unittest.main()

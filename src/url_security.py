@@ -107,7 +107,14 @@ async def _resolve_with_dns(hostname: str, dns_server: str) -> set[str]:
                     raise UnsafeURLError("Validation DNS returned an invalid address") from exc
         return addresses
 
-    answers = await asyncio.gather(query("A"), query("AAAA"))
+    tasks = [asyncio.create_task(query(record_type)) for record_type in ("A", "AAAA")]
+    try:
+        answers = await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
     return set().union(*answers)
 
 
