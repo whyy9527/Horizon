@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import os
+import re
+import shutil
 import socket
 from urllib.parse import urljoin, urlsplit
 
@@ -41,6 +44,9 @@ async def _resolve_hostname(hostname: str, port: int) -> set[str]:
     try:
         literal = ipaddress.ip_address(hostname)
     except ValueError:
+        dns_server = os.environ.get("HORIZON_VALIDATION_DNS")
+        if dns_server is not None:
+            return await _resolve_with_dns(hostname, dns_server)
         try:
             results = await asyncio.to_thread(
                 socket.getaddrinfo,
@@ -52,6 +58,57 @@ async def _resolve_hostname(hostname: str, port: int) -> set[str]:
             raise UnsafeURLError(f"Could not resolve hostname: {hostname}") from exc
         return {str(result[4][0]) for result in results}
     return {str(literal)}
+
+
+async def _resolve_with_dns(hostname: str, dns_server: str) -> set[str]:
+    """Use an explicitly configured resolver when tunnel DNS supplies fake IPs.
+
+    This changes validation DNS only; the HTTP client's proxy and routing remain
+    unchanged. As with system resolution, it does not pin the eventual connection.
+    """
+    try:
+        server = str(ipaddress.ip_address(dns_server.strip()))
+    except ValueError as exc:
+        raise UnsafeURLError("HORIZON_VALIDATION_DNS must be a DNS server IP address") from exc
+    dig = shutil.which("dig")
+    if dig is None:
+        raise UnsafeURLError("HORIZON_VALIDATION_DNS requires the dig executable")
+    try:
+        name = hostname.encode("idna").decode("ascii").rstrip(".") + "."
+    except UnicodeError as exc:
+        raise UnsafeURLError("Invalid DNS hostname") from exc
+
+    async def query(record_type: str) -> set[str]:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                dig, f"@{server}", "-q", name, "-t", record_type,
+                "+noall", "+comments", "+answer", "+tcp", "+time=5", "+tries=1",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, _ = await process.communicate()
+            finally:
+                if process.returncode is None:
+                    process.kill()
+                    await process.wait()
+        except OSError as exc:
+            raise UnsafeURLError("Could not run validation DNS lookup") from exc
+        output = stdout.decode("utf-8", errors="replace")
+        statuses = re.findall(r"status: ([A-Z]+)", output)
+        if process.returncode or not statuses or statuses[-1] != "NOERROR":
+            raise UnsafeURLError(f"Validation DNS lookup failed for {hostname} ({record_type})")
+        addresses = set()
+        for line in output.splitlines():
+            fields = line.split()
+            if len(fields) >= 5 and fields[-3] == "IN" and fields[-2] in {"A", "AAAA"}:
+                try:
+                    addresses.add(str(ipaddress.ip_address(fields[-1])))
+                except ValueError as exc:
+                    raise UnsafeURLError("Validation DNS returned an invalid address") from exc
+        return addresses
+
+    answers = await asyncio.gather(query("A"), query("AAAA"))
+    return set().union(*answers)
 
 
 async def validate_public_http_url(url: str) -> str:
