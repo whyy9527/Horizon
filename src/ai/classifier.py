@@ -5,7 +5,6 @@ import logging
 from pydantic import BaseModel, Field, ValidationError
 
 from .client import AIClient
-from .errors import AIProviderUnavailableError
 from .prompting.classification import (
     classification_system_prompt,
     classification_user_prompt,
@@ -74,8 +73,6 @@ class ContentClassifier:
                 confidence=result.confidence,
                 reason=result.reason,
             )
-        except AIProviderUnavailableError:
-            raise
         except Exception as exc:
             fallback_id = (
                 self.profiles.default_profile

@@ -1,21 +1,35 @@
 """RSS feed scraper implementation."""
 
+import asyncio
 import calendar
 import hashlib
 import logging
 import os
 import re
-from datetime import datetime, timezone
-from typing import List, Optional
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from typing import List, Optional
 import httpx
 import feedparser
 
-from .base import BaseScraper, FetchResult
+from .base import BaseScraper
 from ..extractors import ExtractorRegistry
 from ..models import ContentItem, SourceType, RSSSourceConfig
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RSSFetchResult:
+    """Items and a source-level receipt from one RSS feed."""
+
+    source_name: str
+    source_url: str
+    status: str
+    items: List[ContentItem]
+    error: Optional[str] = None
+
 
 class RSSScraper(BaseScraper):
     """Scraper for RSS/Atom feeds."""
@@ -25,6 +39,8 @@ class RSSScraper(BaseScraper):
         sources: List[RSSSourceConfig],
         http_client: httpx.AsyncClient,
         extractors: Optional[ExtractorRegistry] = None,
+        source_concurrency: int = 1,
+        article_concurrency: int = 1,
     ):
         """Initialize RSS scraper.
 
@@ -35,37 +51,35 @@ class RSSScraper(BaseScraper):
         """
         super().__init__({"sources": sources}, http_client)
         self._extractors = extractors
+        self._source_concurrency = max(1, source_concurrency)
+        self._article_semaphore = asyncio.Semaphore(max(1, article_concurrency))
 
-    async def fetch(self, since: datetime) -> FetchResult:
+    async def fetch(self, since: datetime) -> List[ContentItem]:
         """Fetch RSS feed items.
 
         Args:
             since: Only fetch items published after this time
 
         Returns:
-            FetchResult: Items and per-feed failures
+            List[ContentItem]: Fetched content items
         """
-        result = FetchResult()
-        sources = self.config["sources"]
+        results = await self.fetch_with_receipts(since)
+        return [item for result in results for item in result.items]
 
-        for source in sources:
-            if not source.enabled:
-                continue
+    async def fetch_with_receipts(self, since: datetime) -> List[RSSFetchResult]:
+        """Fetch enabled feeds while retaining success or failure per source."""
+        sources = [source for source in self.config["sources"] if source.enabled]
+        semaphore = asyncio.Semaphore(self._source_concurrency)
 
-            try:
-                feed_result = await self._fetch_feed(source, since)
-            except Exception as exc:
-                result.fail(source.name, exc)
-            else:
-                result.items.extend(feed_result.items)
-                result.failures.update(feed_result.failures)
-                result.successful += feed_result.successful
+        async def fetch_source(source: RSSSourceConfig) -> RSSFetchResult:
+            async with semaphore:
+                return await self._fetch_feed(source, since)
 
-        return result
+        return list(await asyncio.gather(*(fetch_source(source) for source in sources)))
 
     async def _fetch_feed(
         self, source: RSSSourceConfig, since: datetime
-    ) -> FetchResult:
+    ) -> RSSFetchResult:
         """Fetch items from a single RSS feed.
 
         Args:
@@ -73,70 +87,118 @@ class RSSScraper(BaseScraper):
             since: Only fetch items after this time
 
         Returns:
-            FetchResult: Feed content items and entry failures
+            List[ContentItem]: Feed content items
         """
-        result = FetchResult()
+        try:
+            # Expand environment variables in URL (e.g. ${LWN_TOKEN})
+            feed_url = re.sub(
+                r"\$\{(\w+)\}",
+                lambda m: os.environ.get(m.group(1), m.group(0)).strip(),
+                str(source.url),
+            )
 
-        # Expand environment variables in URL (e.g. ${LWN_TOKEN})
-        feed_url = re.sub(
-            r"\$\{(\w+)\}",
-            lambda m: os.environ.get(m.group(1), m.group(0)).strip(),
-            str(source.url),
-        )
-        response = await self.client.get(feed_url, follow_redirects=True)
-        response.raise_for_status()
-        feed = feedparser.parse(response.text)
-        if feed.bozo and not feed.entries:
-            raise ValueError("Invalid RSS/Atom feed")
+            # Fetch feed content
+            response = await self.client.get(feed_url, follow_redirects=True)
+            response.raise_for_status()
 
-        for ordinal, entry in enumerate(feed.entries, start=1):
-            try:
+            # Parse feed
+            feed = feedparser.parse(response.text)
+            if not feed.version or (feed.bozo and not feed.entries):
+                error = feed.get("bozo_exception")
+                detail = f"{type(error).__name__}: {error}" if error else "unrecognized feed format"
+                raise ValueError(f"Invalid RSS/Atom: {detail}")
+
+            effective_since = since
+            if source.max_age_hours:
+                effective_since = max(
+                    since,
+                    datetime.now(timezone.utc) - timedelta(hours=source.max_age_hours),
+                )
+
+            entries = []
+            for entry in feed.entries:
                 published_at = self._parse_date(entry)
-                if not published_at or published_at < since:
+                if not published_at or published_at < effective_since:
                     continue
+                entries.append((entry, published_at))
 
-                feed_id = str(source.url).split("//")[1].replace("/", "_")
-                entry_id = entry.get("id", entry.get("link", ""))
-                entry_hash = hashlib.sha256(str(entry_id).encode("utf-8")).hexdigest()[:16]
-                content = self._extract_content(entry)
+            items = list(
+                await asyncio.gather(
+                    *(self._build_item(source, entry, published_at) for entry, published_at in entries)
+                )
+            )
+            return RSSFetchResult(
+                source_name=source.name,
+                source_url=str(source.url),
+                status=f"http_{response.status_code}",
+                items=items,
+            )
 
-                if source.content_extractor and self._extractors:
-                    extractor = self._extractors.get(source.content_extractor)
-                    if extractor:
-                        url = entry.get("link", "")
-                        if url:
-                            full = await extractor.extract(url, self.client)
-                            if full:
-                                content = full
+        except httpx.HTTPError as exc:
+            error = f"{type(exc).__name__}: {str(exc) or 'no exception message'}"
+            logger.warning("Error fetching RSS feed %s: %s", source.name, error)
+            return RSSFetchResult(source.name, str(source.url), "error", [], error)
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {str(exc) or 'no exception message'}"
+            logger.warning("Error parsing RSS feed %s: %s", source.name, error)
+            return RSSFetchResult(source.name, str(source.url), "error", [], error)
 
-                result.items.append(ContentItem(
-                    id=self._generate_id("rss", feed_id, entry_hash),
-                    source_type=SourceType.RSS,
-                    title=entry.get("title", "Untitled"),
-                    url=entry.get("link", str(source.url)),
-                    content=content,
-                    author=entry.get("author", source.name),
-                    published_at=published_at,
-                    profile=source.profile,
-                    metadata={
-                        "feed_name": source.name,
-                        "category": source.category,
-                        "tags": [tag.term for tag in entry.get("tags", [])],
-                    },
-                ))
-            except Exception as exc:
-                label = f"{source.name}/entry:{ordinal}"
-                # Avoid multiline validation details that include entry values.
-                reason = str(exc).partition("\n")[0][:200]
-                error = f"{type(exc).__name__}: {reason}"
-                result.failures[label] = error
-                logger.warning("Skipping RSS entry %s: %s", label, error)
+    async def _build_item(
+        self, source: RSSSourceConfig, entry: dict, published_at: datetime
+    ) -> ContentItem:
+        feed_id = str(source.url).split("//", 1)[1].replace("/", "_")
+        entry_id = entry.get("id", entry.get("link", ""))
+        entry_hash = hashlib.sha256(str(entry_id).encode("utf-8")).hexdigest()[:16]
+        feed_content = "" if source.require_content_extraction else self._extract_content(entry)
+        content: Optional[str] = feed_content or None
+        extraction = {
+            "requested": bool(source.content_extractor),
+            "status": "not_requested",
+            "extractor": source.content_extractor,
+            "content_length": 0,
+        }
+        if not source.require_content_extraction:
+            extraction["feed_content_length"] = len(feed_content)
+        if source.content_extractor:
+            extractor = self._extractors.get(source.content_extractor) if self._extractors else None
+            url = entry.get("link", "")
+            if not extractor:
+                extraction["status"] = "extractor_unavailable"
+            elif not url:
+                extraction["status"] = "missing_article_url"
+            else:
+                async with self._article_semaphore:
+                    full, cleaning = await extractor.extract_with_receipt(url, self.client)
+                if cleaning:
+                    extraction["html_cleaning"] = cleaning
+                if full:
+                    content = full
+                    extraction["status"] = "extracted"
+                    extraction["content_length"] = len(full)
+                else:
+                    extraction["status"] = "failed"
+            if source.require_content_extraction and extraction["status"] != "extracted":
+                content = None
 
-        # A feed with only rejected entries is not a successful empty response.
-        result.successful = int(bool(result.items) or not result.failures)
-        return result
+        return ContentItem(
+            id=self._generate_id("rss", feed_id, entry_hash),
+            source_type=SourceType.RSS,
+            title=entry.get("title", "Untitled"),
+            url=entry.get("link", str(source.url)),
+            content=content,
+            author=entry.get("author", source.name),
+            published_at=published_at,
+            profile=source.profile,
+            metadata={
+                "feed_name": source.name,
+                "category": source.category,
+                "source_family": source.source_family,
+                "tags": [tag.term for tag in entry.get("tags", [])],
+                "content_extraction": extraction,
+            },
+        )
 
-    def _parse_date(self, entry: dict) -> datetime:
+    def _parse_date(self, entry: dict) -> Optional[datetime]:
         """Parse publication date from feed entry.
 
         Args:
@@ -174,27 +236,13 @@ class RSSScraper(BaseScraper):
         Returns:
             str: Extracted text content
         """
-        content = entry.get("content", [])
-        if not isinstance(content, (list, tuple)):
-            content = []
-        candidates = []
-        for part in content:
-            if not isinstance(part, dict):
-                continue
-            media_type = part.get("type", "")
-            if not isinstance(media_type, str):
-                continue
-            media_type = media_type.split(";", 1)[0].strip().lower()
-            if media_type and not (
-                media_type.startswith("text/")
-                or media_type in ("html", "xhtml", "application/xhtml+xml")
-            ):
-                continue
-            candidates.append(part.get("value"))
-        # max keeps the first candidate on ties, so prefer content alternatives.
-        candidates.extend([entry.get("summary"), entry.get("description")])
-        return max(
-            (value for value in candidates if isinstance(value, str) and value.strip()),
-            key=len,
-            default="",
-        )
+        # Try different content fields
+        if "summary" in entry:
+            return entry.summary
+        if "description" in entry:
+            return entry.description
+        if "content" in entry and entry.content:
+            # content is usually a list
+            return entry.content[0].get("value", "")
+
+        return ""

@@ -14,7 +14,6 @@ import logging
 
 from ..models import AIConfig, AIProvider, AI_PROVIDER_DEFAULTS
 from .tokens import record_usage
-from .errors import AIProviderUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -158,16 +157,12 @@ class AnthropicClient(AIClient):
         temperature = self.temperature if temperature is None else temperature
         max_tokens = self.max_tokens if max_tokens is None else max_tokens
 
-        request_kwargs = {}
-        if self.config.extra_body:
-            request_kwargs["extra_body"] = self.config.extra_body
         message = await self.client.messages.create(
             model=self.model,
             max_tokens=max_tokens,
             temperature=temperature,
             system=system,
-            messages=[{"role": "user", "content": user}],
-            **request_kwargs,
+            messages=[{"role": "user", "content": user}]
         )
         usage = getattr(message, "usage", None)
         if usage is not None:
@@ -176,8 +171,7 @@ class AnthropicClient(AIClient):
                 input_tokens=getattr(usage, "input_tokens", 0),
                 output_tokens=getattr(usage, "output_tokens", 0),
             )
-        # Thinking blocks (e.g. enabled via ai.extra_body) precede the answer text.
-        return "".join(block.text for block in message.content if block.type == "text")
+        return message.content[0].text
 
 
 class OpenAIClient(AIClient):
@@ -334,8 +328,6 @@ class OpenAIClient(AIClient):
             request_kwargs["temperature"] = temperature
         if self.provider not in self._NO_RESPONSE_FORMAT:
             request_kwargs["response_format"] = {"type": "json_object"}
-        if self.config.extra_body:
-            request_kwargs["extra_body"] = self.config.extra_body
         return await self.client.chat.completions.create(**request_kwargs)
 
     @staticmethod
@@ -462,9 +454,6 @@ class AzureOpenAIClient(AIClient):
             if use_max_completion_tokens
             else {"max_tokens": max_tokens}
         )
-        extra_kwargs = (
-            {"extra_body": self.config.extra_body} if self.config.extra_body else {}
-        )
         return await self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -474,7 +463,6 @@ class AzureOpenAIClient(AIClient):
             temperature=temperature,
             response_format={"type": "json_object"},
             **tokens_kwarg,
-            **extra_kwargs,
         )
 
     @staticmethod
@@ -497,8 +485,6 @@ class GeminiClient(AIClient):
             config: AI configuration
         """
         self.config = config
-        if config.extra_body:
-            raise ValueError("ai.extra_body is not supported for the gemini provider")
 
         api_key = _resolve_api_key(config)
 
@@ -555,9 +541,6 @@ def _uses_anthropic_compatible_api(config: AIConfig) -> bool:
 
 def _create_single_client(config: AIConfig) -> AIClient:
     """Create a single AI client instance."""
-    if config.provider == AIProvider.OPENAI_CHATGPT:
-        from .chatgpt import ChatGPTClient
-        return ChatGPTClient(config)
     if (
         config.provider == AIProvider.ANTHROPIC
         or _uses_anthropic_compatible_api(config)
@@ -639,8 +622,6 @@ class ChainedAIClient(AIClient):
     @staticmethod
     def _should_fallback(exc: Exception) -> bool:
         """Determine if an error warrants fallback to the next provider."""
-        if isinstance(exc, AIProviderUnavailableError):
-            return False
         msg = str(exc).lower()
         if "429" in msg or "rate limit" in msg:
             return True
@@ -671,15 +652,9 @@ def _create_chained_client(config: AIConfig) -> ChainedAIClient:
         base_url = config.base_url if provider == config.provider else defaults.get("base_url")
         cfg = AIConfig(
             provider=provider,
-            model=(
-                config.model
-                if provider == config.provider and provider in {AIProvider.MINIMAX, AIProvider.OPENAI_CHATGPT}
-                else defaults.get("model", config.model)
-            ),
+            model=defaults.get("model", config.model),
             api_key_env=defaults.get("api_key_env", config.api_key_env),
-            chatgpt_account=config.chatgpt_account if provider == AIProvider.OPENAI_CHATGPT else None,
             base_url=base_url,
-            extra_body=config.extra_body if provider == config.provider else None,
             temperature=config.temperature,
             max_tokens=config.max_tokens,
             throttle_sec=config.throttle_sec,

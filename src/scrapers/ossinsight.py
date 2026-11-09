@@ -13,7 +13,7 @@ from typing import List, Optional
 import httpx
 
 from ..models import ContentItem, OSSInsightConfig, SourceType
-from .base import BaseScraper, FetchResult
+from .base import BaseScraper
 
 
 class OSSInsightScraper(BaseScraper):
@@ -32,49 +32,45 @@ class OSSInsightScraper(BaseScraper):
         self.cfg: OSSInsightConfig = config
         self._keywords_lower = [kw.lower() for kw in self.cfg.keywords if kw]
 
-    async def fetch(self, since: datetime) -> FetchResult:
+    async def fetch(self, since: datetime) -> List[ContentItem]:
         """Fetch trending repos for each configured language and apply filters."""
-        result = FetchResult()
         if not self.cfg.enabled:
-            return result
+            return []
 
         items: List[ContentItem] = []
         seen_ids: set[str] = set()
 
         for lang in self.cfg.languages:
-            await result.collect(lang, self._fetch_language(lang))
-        for item in result.items:
-            if item.id not in seen_ids:
+            rows = await self._fetch_period(self.cfg.period, lang)
+            for row in rows:
+                item = self._row_to_item(row, lang)
+                if item is None:
+                    continue
+                if item.id in seen_ids:
+                    continue
+                if self.cfg.min_stars and self._stars_int(row) < self.cfg.min_stars:
+                    continue
+                if self._keywords_lower and not self._matches_keywords(row):
+                    continue
                 seen_ids.add(item.id)
                 items.append(item)
 
         items.sort(key=lambda x: x.metadata.get("stars_gained", 0), reverse=True)
-        result.items = items[: self.cfg.max_items]
-        return result
-
-    async def _fetch_language(self, language: str) -> List[ContentItem]:
-        rows = await self._fetch_period(self.cfg.period, language)
-        items = []
-        for row in rows:
-            if self.cfg.min_stars and self._stars_int(row) < self.cfg.min_stars:
-                continue
-            if self._keywords_lower and not self._matches_keywords(row):
-                continue
-            item = self._row_to_item(row, language)
-            if item is not None:
-                items.append(item)
-        return items
+        return items[: self.cfg.max_items]
 
     async def _fetch_period(self, period: str, language: str) -> List[dict]:
         """Call OSS Insight API for one (period, language) combo."""
         params = {"period": period, "language": language}
-        response = await self.client.get(
-            self.BASE_URL,
-            params=params,
-            headers={"Accept": "application/json", "User-Agent": "Horizon/1.0"},
-            timeout=20.0,
-        )
-        response.raise_for_status()
+        try:
+            response = await self.client.get(
+                self.BASE_URL,
+                params=params,
+                headers={"Accept": "application/json", "User-Agent": "Horizon/1.0"},
+                timeout=20.0,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError:
+            return []
 
         payload = response.json()
         data = payload.get("data") or {}

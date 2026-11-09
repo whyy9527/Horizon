@@ -9,7 +9,7 @@ from typing import List, Optional
 import httpx
 from bs4 import BeautifulSoup
 
-from .base import BaseScraper, FetchResult
+from .base import BaseScraper
 from ..models import ContentItem, TelegramConfig, TelegramChannelConfig, SourceType
 
 logger = logging.getLogger(__name__)
@@ -30,18 +30,31 @@ class TelegramScraper(BaseScraper):
         super().__init__(config.model_dump(), http_client)
         self.telegram_config = config
 
-    async def fetch(self, since: datetime) -> FetchResult:
-        result = FetchResult()
+    async def fetch(self, since: datetime) -> List[ContentItem]:
         if not self.config.get("enabled", True):
-            return result
+            return []
 
         tasks = []
         for channel_cfg in self.telegram_config.channels:
             if channel_cfg.enabled:
-                tasks.append(result.collect(channel_cfg.channel, self._fetch_channel(channel_cfg, since)))
+                tasks.append(self._fetch_channel(channel_cfg, since))
 
-        await asyncio.gather(*tasks)
-        return result
+        if not tasks:
+            return []
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        items = []
+        failures = []
+        for result in results:
+            if isinstance(result, Exception):
+                failures.append(result)
+                logger.warning("Error fetching Telegram channel: %s", result)
+            elif isinstance(result, list):
+                items.extend(result)
+
+        if failures and len(failures) == len(results):
+            raise RuntimeError(f"All Telegram channels failed: {failures[0]}") from failures[0]
+        return items
 
     async def _fetch_channel(self, cfg: TelegramChannelConfig, since: datetime) -> List[ContentItem]:
         headers = {"User-Agent": USER_AGENT}

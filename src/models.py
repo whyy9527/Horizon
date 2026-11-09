@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import Enum
 import re
 from typing import Annotated, Literal, Optional, List, Dict, Any, NamedTuple, Union
-from pydantic import BaseModel, ConfigDict, HttpUrl, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, HttpUrl, Field, field_validator
 
 
 class SourceType(str, Enum):
@@ -123,7 +123,6 @@ class AIProvider(str, Enum):
 
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
-    OPENAI_CHATGPT = "openai-chatgpt"
     AZURE = "azure"
     ALI = "ali"
     GEMINI = "gemini"
@@ -143,11 +142,6 @@ AI_PROVIDER_DEFAULTS = {
     AIProvider.OPENAI: {
         "model": "gpt-4",
         "api_key_env": "OPENAI_API_KEY",
-        "base_url": None,
-    },
-    AIProvider.OPENAI_CHATGPT: {
-        "model": "",  # Selected from the signed-in account's model catalog.
-        "api_key_env": "",
         "base_url": None,
     },
     AIProvider.AZURE: {
@@ -173,7 +167,7 @@ AI_PROVIDER_DEFAULTS = {
         "base_url": "https://ark.cn-beijing.volces.com/api/v3",
     },
     AIProvider.MINIMAX: {
-        "model": "MiniMax-M3.1-Flash",
+        "model": "MiniMax-M3",
         "api_key_env": "MINIMAX_API_KEY",
         "base_url": "https://api.minimax.io/v1",
     },
@@ -198,8 +192,6 @@ class AIConfig(BaseModel):
     model: str
     base_url: Optional[str] = None
     api_key_env: str
-    chatgpt_account: Optional[str] = None
-    extra_body: Optional[Dict[str, Any]] = None
     temperature: float = 0.3
     max_tokens: int = 4096
     throttle_sec: float = 0.0
@@ -209,30 +201,6 @@ class AIConfig(BaseModel):
     # Azure OpenAI specific; required when provider == AZURE
     azure_endpoint_env: Optional[str] = None
     api_version: Optional[str] = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def default_chatgpt_credentials(cls, value: Any) -> Any:
-        if isinstance(value, dict) and value.get("provider") == AIProvider.OPENAI_CHATGPT:
-            value = dict(value)
-            value.setdefault("api_key_env", "")
-        return value
-
-    @model_validator(mode="after")
-    def validate_chatgpt_settings(self) -> "AIConfig":
-        chain = [name.strip() for name in (self.provider_chain or "").split(",")]
-        if "openai-chatgpt" in chain and self.provider != AIProvider.OPENAI_CHATGPT:
-            raise ValueError("ChatGPT in provider_chain requires ai.provider=openai-chatgpt and its account-specific model")
-        if self.provider == AIProvider.OPENAI_CHATGPT:
-            if not self.model.strip():
-                raise ValueError("Choose a ChatGPT model using horizon-chatgpt models")
-            if self.base_url and self.base_url.rstrip("/") != "https://api.openai.com/v1":
-                raise ValueError("openai-chatgpt uses https://api.openai.com/v1; custom base_url is not supported")
-            if self.extra_body:
-                raise ValueError("ai.extra_body is not supported for openai-chatgpt preview requests")
-            if self.api_key_env:
-                raise ValueError("openai-chatgpt uses OAuth; leave api_key_env empty")
-        return self
 
     @field_validator("languages")
     @classmethod
@@ -269,6 +237,8 @@ class HackerNewsConfig(BaseModel):
 
 class ExtractorType(str, Enum):
     TRAFILATURA = "trafilatura"
+    PLAIN_TEXT = "plain_text"
+    BROWSER = "browser"
 
 
 class TrafilaturaExtractorConfig(BaseModel):
@@ -277,8 +247,20 @@ class TrafilaturaExtractorConfig(BaseModel):
     favor_recall: bool = False
 
 
+class PlainTextExtractorConfig(BaseModel):
+    """Keep an already-textual public resource such as a Markdown document."""
+
+    type: Literal[ExtractorType.PLAIN_TEXT] = ExtractorType.PLAIN_TEXT
+
+
+class BrowserExtractorConfig(TrafilaturaExtractorConfig):
+    """Read a public article in an ordinary visible Chromium browser."""
+
+    type: Literal[ExtractorType.BROWSER] = ExtractorType.BROWSER
+
+
 ExtractorConfig = Annotated[
-    Union[TrafilaturaExtractorConfig],
+    Union[TrafilaturaExtractorConfig, PlainTextExtractorConfig, BrowserExtractorConfig],
     Field(discriminator="type"),
 ]
 
@@ -290,8 +272,11 @@ class RSSSourceConfig(BaseModel):
     url: HttpUrl
     enabled: bool = True
     category: Optional[str] = None
+    max_age_hours: Optional[int] = Field(default=None, gt=0)
+    source_family: Optional[str] = None
     content_extractor: Optional[str] = None
     profile: ProfileRoute = None
+    require_content_extraction: bool = False
 
 
 class RedditSubredditConfig(BaseModel):
@@ -396,7 +381,7 @@ class OpenBBConfig(BaseModel):
 
     Uses the installed `openbb` SDK to fetch news and filings for a set of
     tickers. The SDK is an optional dependency; if it is not installed the
-    scraper reports a source failure while other sources can still run.
+    scraper will no-op with a console warning rather than crash the run.
 
     Provider credentials (FMP, Benzinga, Polygon, Intrinio, Tiingo, etc.)
     are resolved by openbb from environment variables / its own user
@@ -496,17 +481,61 @@ class WebhookConfig(BaseModel):
         None  # POST body: real JSON object or string with #{key} placeholders; if empty, will use GET
     )
     headers: Optional[str] = None  # Custom headers, "Key: Value" per line
-    delivery: Literal["summary", "summary_and_items"] = "summary"
-    overview_position: Literal["first", "last"] = "first"
-    platform: Literal["generic", "feishu", "lark", "dingtalk", "slack", "discord"] = "generic"
-    layout: Literal["markdown", "collapsible"] = "markdown"
-    fallback_layout: Literal["markdown", "collapsible"] = (
+    delivery: str = "summary"  # summary, or summary_and_items
+    overview_position: str = "first"  # For summary_and_items: first, or last
+    platform: str = "generic"  # generic, feishu, lark, dingtalk, slack, discord
+    layout: str = "markdown"  # markdown, or collapsible
+    fallback_layout: str = (
         "markdown"  # Layout to use when the requested layout is unsupported
     )
     languages: Optional[List[str]] = (
         None  # Optional language filter for webhook delivery; defaults to all AI languages
     )
     enabled: bool = False
+
+    @field_validator("delivery")
+    @classmethod
+    def validate_delivery(cls, v: str) -> str:
+        allowed = {"summary", "summary_and_items"}
+        if v not in allowed:
+            raise ValueError(f"webhook.delivery must be one of {allowed}, got '{v}'")
+        return v
+
+    @field_validator("platform")
+    @classmethod
+    def validate_platform(cls, v: str) -> str:
+        allowed = {"generic", "feishu", "lark", "dingtalk", "slack", "discord"}
+        if v not in allowed:
+            raise ValueError(f"webhook.platform must be one of {allowed}, got '{v}'")
+        return v
+
+    @field_validator("layout")
+    @classmethod
+    def validate_layout(cls, v: str) -> str:
+        allowed = {"markdown", "collapsible"}
+        if v not in allowed:
+            raise ValueError(f"webhook.layout must be one of {allowed}, got '{v}'")
+        return v
+
+    @field_validator("fallback_layout")
+    @classmethod
+    def validate_fallback_layout(cls, v: str) -> str:
+        allowed = {"markdown", "collapsible"}
+        if v not in allowed:
+            raise ValueError(
+                f"webhook.fallback_layout must be one of {allowed}, got '{v}'"
+            )
+        return v
+
+    @field_validator("overview_position")
+    @classmethod
+    def validate_overview_position(cls, v: str) -> str:
+        allowed = {"first", "last"}
+        if v not in allowed:
+            raise ValueError(
+                f"webhook.overview_position must be one of {allowed}, got '{v}'"
+            )
+        return v
 
 
 class WeChatConfig(BaseModel):
@@ -584,7 +613,6 @@ class DigestConfig(BaseModel):
 
     max_items: Optional[int] = Field(default=None, gt=0)
     category_groups: Dict[str, CategoryGroupConfig] = Field(default_factory=dict)
-    group_by: Literal["category", "profile"] = "category"
     default_group: str = "other"
     default_group_limit: Optional[int] = Field(default=None, gt=0)
     profile_order: List[str] = Field(default_factory=list)

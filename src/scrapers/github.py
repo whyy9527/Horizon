@@ -1,12 +1,16 @@
 """GitHub scraper implementation."""
 
+import logging
 import os
 from datetime import datetime
 from typing import List, Optional
 import httpx
 
-from .base import BaseScraper, FetchResult
+from .base import BaseScraper
 from ..models import ContentItem, SourceType, GitHubSourceConfig
+
+logger = logging.getLogger(__name__)
+
 
 class GitHubScraper(BaseScraper):
     """Scraper for GitHub events and releases."""
@@ -36,16 +40,16 @@ class GitHubScraper(BaseScraper):
             headers["Authorization"] = f"token {self.token}"
         return headers
 
-    async def fetch(self, since: datetime) -> FetchResult:
+    async def fetch(self, since: datetime) -> List[ContentItem]:
         """Fetch GitHub content items.
 
         Args:
             since: Only fetch items published after this time
 
         Returns:
-            FetchResult: Items and per-user/repository failures
+            List[ContentItem]: Fetched content items
         """
-        result = FetchResult()
+        items = []
         sources = self.config["sources"]
 
         for source in sources:
@@ -53,13 +57,13 @@ class GitHubScraper(BaseScraper):
                 continue
 
             if source.type == "user_events" and source.username:
-                await result.collect(source.username, self._fetch_user_events(source, since))
+                user_items = await self._fetch_user_events(source, since)
+                items.extend(user_items)
             elif source.type == "repo_releases" and source.owner and source.repo:
-                await result.collect(f"{source.owner}/{source.repo}", self._fetch_repo_releases(source, since))
-            else:
-                result.fail(source.username or source.repo or source.type, ValueError("Invalid GitHub source configuration"))
+                release_items = await self._fetch_repo_releases(source, since)
+                items.extend(release_items)
 
-        return result
+        return items
 
     async def _fetch_user_events(
         self,
@@ -78,23 +82,33 @@ class GitHubScraper(BaseScraper):
         url = f"{self.base_url}/users/{source.username}/events/public"
         items = []
 
-        response = await self.client.get(url, headers=self._get_headers(), follow_redirects=True)
-        response.raise_for_status()
-        events = response.json()
+        try:
+            response = await self.client.get(url, headers=self._get_headers(), follow_redirects=True)
+            response.raise_for_status()
+            events = response.json()
 
-        for event in events:
-            created_at = datetime.fromisoformat(
-                event["created_at"].replace("Z", "+00:00")
-            )
-            if created_at < since:
-                continue
-            if event["type"] not in {
-                "PushEvent", "CreateEvent", "ReleaseEvent", "PublicEvent", "WatchEvent"
-            }:
-                continue
-            item = self._parse_event(event, source)
-            if item:
-                items.append(item)
+            for event in events:
+                created_at = datetime.fromisoformat(
+                    event["created_at"].replace("Z", "+00:00")
+                )
+
+                if created_at < since:
+                    continue
+
+                # Filter interesting event types
+                event_type = event["type"]
+                if event_type not in [
+                    "PushEvent", "CreateEvent", "ReleaseEvent",
+                    "PublicEvent", "WatchEvent"
+                ]:
+                    continue
+
+                item = self._parse_event(event, source)
+                if item:
+                    items.append(item)
+
+        except httpx.HTTPError as e:
+            logger.warning("Error fetching GitHub events for %s: %s", source.username, e)
 
         return items
 
@@ -173,31 +187,38 @@ class GitHubScraper(BaseScraper):
         url = f"{self.base_url}/repos/{owner}/{repo}/releases"
         items = []
 
-        response = await self.client.get(url, headers=self._get_headers(), follow_redirects=True)
-        response.raise_for_status()
-        releases = response.json()
+        try:
+            response = await self.client.get(url, headers=self._get_headers(), follow_redirects=True)
+            response.raise_for_status()
+            releases = response.json()
 
-        for release in releases:
-            published_at = datetime.fromisoformat(
-                release["published_at"].replace("Z", "+00:00")
-            )
-            if published_at < since:
-                continue
-            items.append(ContentItem(
-                id=self._generate_id("github", "release", str(release["id"])),
-                source_type=SourceType.GITHUB,
-                title=f"{owner}/{repo} released {release['tag_name']}",
-                url=release["html_url"],
-                content=release.get("body", ""),
-                author=release["author"]["login"],
-                published_at=published_at,
-                profile=source.profile,
-                metadata={
-                    "repo": f"{owner}/{repo}",
-                    "tag": release["tag_name"],
-                    "prerelease": release.get("prerelease", False),
-                    "category": source.category,
-                },
-            ))
+            for release in releases:
+                published_at = datetime.fromisoformat(
+                    release["published_at"].replace("Z", "+00:00")
+                )
+
+                if published_at < since:
+                    continue
+
+                item = ContentItem(
+                    id=self._generate_id("github", "release", str(release["id"])),
+                    source_type=SourceType.GITHUB,
+                    title=f"{owner}/{repo} released {release['tag_name']}",
+                    url=release["html_url"],
+                    content=release.get("body", ""),
+                    author=release["author"]["login"],
+                    published_at=published_at,
+                    profile=source.profile,
+                    metadata={
+                        "repo": f"{owner}/{repo}",
+                        "tag": release["tag_name"],
+                        "prerelease": release.get("prerelease", False),
+                        "category": source.category,
+                    }
+                )
+                items.append(item)
+
+        except httpx.HTTPError as e:
+            logger.warning("Error fetching releases for %s/%s: %s", owner, repo, e)
 
         return items

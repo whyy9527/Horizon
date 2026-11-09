@@ -1,11 +1,16 @@
 """Trafilatura-based article extractor."""
 
+import hashlib
 import logging
+import re
 from typing import Optional
 
 import httpx
 
 from .base import BaseExtractor
+from .html_components import (clean_article_opening, clean_registration_cards,
+                              clean_newsletter_preambles, clean_product_listing_components,
+                              prepare_article_content)
 from ..models import TrafilaturaExtractorConfig
 from ..url_security import UnsafeURLError, safe_request
 
@@ -21,31 +26,90 @@ ARTICLE_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
+CHALLENGE_TEXT = re.compile(
+    r"(?:javascript is disabled\s+)?"
+    r"in order to continue, we need to verify that you're not a robot\.\s*"
+    r"this requires javascript\.\s*enable javascript and then reload the page\.?"
+    r"|(?:just a moment[.!…]*\s*)?enable javascript and cookies to continue[.!…]*"
+    r"|verification successful\.\s*waiting for [\w.-]+ to respond[.!…]*",
+    re.IGNORECASE,
+)
+
 
 class TrafilaturaExtractor(BaseExtractor):
     def __init__(self, config: TrafilaturaExtractorConfig):
         self._config = config
 
     async def extract(self, url: str, client: httpx.AsyncClient) -> Optional[str]:
+        text, _ = await self.extract_with_receipt(url, client)
+        return text
+
+    async def extract_with_receipt(self, url: str, client: httpx.AsyncClient) -> tuple[Optional[str], dict]:
         try:
             import trafilatura
         except ImportError:
             logger.warning("trafilatura is not installed; install with: uv pip install trafilatura>=2.1.0")
-            return None
+            return None, {}
 
         try:
             response = await safe_request(client, "GET", url, headers=ARTICLE_HEADERS)
             response.raise_for_status()
         except (httpx.HTTPError, UnsafeURLError) as e:
             logger.warning("Failed to fetch article %s: %s", url, e)
-            return None
+            return None, {}
+
+        if response.headers.get("cf-mitigated") == "challenge":
+            logger.warning("Browser challenge returned instead of article %s", url)
+            return None, {}
 
         try:
-            return trafilatura.extract(
-                response.text,
+            return self.extract_text_with_receipt(response.text)
+        except Exception as e:
+            logger.warning("trafilatura extraction failed for %s: %s", url, e)
+            return None, {}
+
+    def extract_text(self, html: str) -> Optional[str]:
+        text, _ = self.extract_text_with_receipt(html)
+        return text
+
+    def extract_text_with_receipt(self, html: str) -> tuple[Optional[str], dict]:
+        import trafilatura
+
+        try:
+            html, receipt = clean_registration_cards(html)
+        except Exception as exc:
+            # Failed component recognition must not discard a usable article.
+            logger.warning("HTML component cleaning skipped: %s", type(exc).__name__)
+            receipt = {"status": "failed", "error": type(exc).__name__}
+        text = trafilatura.extract(
+            html,
+            favor_precision=self._config.favor_precision,
+            favor_recall=self._config.favor_recall,
+        ) or None
+        html, article_content = prepare_article_content(html, text or '')
+        if article_content:
+            receipt = {**receipt, "article_content": article_content}
+            text = trafilatura.extract(
+                html,
                 favor_precision=self._config.favor_precision,
                 favor_recall=self._config.favor_recall,
             ) or None
-        except Exception as e:
-            logger.warning("trafilatura extraction failed for %s: %s", url, e)
-            return None
+        if text and CHALLENGE_TEXT.fullmatch(" ".join(text.split())):
+            logger.warning("Browser challenge extracted instead of article")
+            return None, receipt
+        if text:
+            try:
+                text, listing = clean_product_listing_components(text, html)
+                if listing:
+                    receipt = {**receipt, 'product_listing': listing}
+                text, promotion = clean_newsletter_preambles(text, html)
+                if promotion:
+                    receipt = {**receipt, "newsletter_promotion": promotion}
+                text, opening = clean_article_opening(text, html)
+                if opening:
+                    receipt = {**receipt, "article_opening": opening}
+            except Exception as exc:
+                logger.warning("Article opening cleaning skipped: %s", type(exc).__name__)
+        if article_content:
+            receipt['article_content']['extracted_sha256'] = hashlib.sha256((text or '').encode()).hexdigest()
+        return text, receipt
