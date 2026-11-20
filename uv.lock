@@ -1118,6 +1118,7 @@ dependencies = [
     { name = "mcp" },
     { name = "openai" },
     { name = "opencc-python-reimplemented" },
+    { name = "playwright" },
     { name = "pydantic" },
     { name = "pyjwt", extra = ["crypto"] },
     { name = "python-dateutil" },
@@ -1138,7 +1139,6 @@ openbb = [
     { name = "openbb-benzinga" },
 ]
 twitter = [
-    { name = "playwright" },
     { name = "playwright-stealth" },
 ]
 
@@ -1157,7 +1157,7 @@ requires-dist = [
     { name = "openbb", marker = "extra == 'openbb'", specifier = ">=4.4.0" },
     { name = "openbb-benzinga", marker = "extra == 'openbb'", specifier = ">=1.6.0" },
     { name = "opencc-python-reimplemented", specifier = ">=0.1.7" },
-    { name = "playwright", marker = "extra == 'twitter'", specifier = ">=1.40.0" },
+    { name = "playwright", specifier = ">=1.40.0" },
     { name = "playwright-stealth", marker = "extra == 'twitter'", specifier = ">=1.0.0" },
     { name = "pydantic", specifier = ">=2.9.0" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10.1" },

@@ -61,6 +61,19 @@ Uses the [trafilatura](https://trafilatura.readthedocs.io/) library to extract m
 
 **Timeout and retry**: the extractor reuses the shared `httpx.AsyncClient` and inherits whatever timeout and connection settings are configured on it.
 
+### `browser`
+
+Uses Playwright Chromium to render public article pages before extracting their main text. Playwright is a Horizon dependency. When an RSS source uses `content_extractor: browser`, install the matching Chromium in the environment that runs the extractor.
+
+```sh
+uv sync --locked --inexact
+PLAYWRIGHT_SKIP_BROWSER_GC=1 .venv/bin/python -m playwright install chromium
+```
+
+The extraction-only RSS command records failed article URLs in the affected
+source receipt. A feed that returns entries with zero usable bodies receives a
+failed source receipt.
+
 ## Adding a new extractor type
 
 1. Add an entry to `ExtractorType` in `src/models.py`.

@@ -51,7 +51,10 @@ class BrowserExtractor(TrafilaturaExtractor):
 
                     await context.route("**/*", public_requests_only)
                     page = await context.new_page()
-                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    if response is not None and response.status >= 400:
+                        logger.warning("Browser article extraction failed for %s: HTTP %s", url, response.status)
+                        return None, {}
                     await page.locator("main h1, article h1").first.wait_for(timeout=30000)
                     return self.extract_text_with_receipt(await page.content())
                 finally:
