@@ -277,6 +277,7 @@ class RSSSourceConfig(BaseModel):
     content_extractor: Optional[str] = None
     profile: ProfileRoute = None
     require_content_extraction: bool = False
+    publication_time: Literal["feed", "calendar_date", "article"] = "feed"
 
 
 class RedditSubredditConfig(BaseModel):

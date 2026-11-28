@@ -7,6 +7,7 @@ from typing import Optional
 
 import httpx
 
+from .article_publication import article_publication
 from .base import BaseExtractor
 from .html_components import (clean_article_opening, clean_registration_cards,
                               clean_newsletter_preambles, clean_product_listing_components,
@@ -44,7 +45,8 @@ class TrafilaturaExtractor(BaseExtractor):
         text, _ = await self.extract_with_receipt(url, client)
         return text
 
-    async def extract_with_receipt(self, url: str, client: httpx.AsyncClient) -> tuple[Optional[str], dict]:
+    async def extract_with_receipt(self, url: str, client: httpx.AsyncClient, *,
+                                   include_publication: bool = False) -> tuple[Optional[str], dict]:
         try:
             import trafilatura
         except ImportError:
@@ -63,7 +65,7 @@ class TrafilaturaExtractor(BaseExtractor):
             return None, {}
 
         try:
-            return self.extract_text_with_receipt(response.text)
+            return self.extract_text_with_receipt(response.text, include_publication=include_publication)
         except Exception as e:
             logger.warning("trafilatura extraction failed for %s: %s", url, e)
             return None, {}
@@ -72,9 +74,10 @@ class TrafilaturaExtractor(BaseExtractor):
         text, _ = self.extract_text_with_receipt(html)
         return text
 
-    def extract_text_with_receipt(self, html: str) -> tuple[Optional[str], dict]:
+    def extract_text_with_receipt(self, html: str, *, include_publication: bool = False) -> tuple[Optional[str], dict]:
         import trafilatura
 
+        publication = article_publication(html) if include_publication else None
         try:
             html, receipt = clean_registration_cards(html)
         except Exception as exc:
@@ -112,4 +115,6 @@ class TrafilaturaExtractor(BaseExtractor):
                 logger.warning("Article opening cleaning skipped: %s", type(exc).__name__)
         if article_content:
             receipt['article_content']['extracted_sha256'] = hashlib.sha256((text or '').encode()).hexdigest()
+        if text and publication:
+            receipt["publication"] = publication
         return text, receipt

@@ -7,7 +7,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import List, Optional
 import httpx
@@ -118,13 +118,20 @@ class RSSScraper(BaseScraper):
             entries = []
             for entry in feed.entries:
                 published_at = self._parse_date(entry)
-                if not published_at or published_at < effective_since:
+                if not published_at:
                     continue
-                entries.append((entry, published_at))
+                day_precision = source.publication_time == "calendar_date" and published_at.time() == time.min
+                if day_precision:
+                    if published_at + timedelta(days=1) <= effective_since:
+                        continue
+                elif published_at < effective_since:
+                    continue
+                entries.append((entry, published_at, day_precision))
 
             items = list(
                 await asyncio.gather(
-                    *(self._build_item(source, entry, published_at) for entry, published_at in entries)
+                    *(self._build_item(source, entry, published_at, day_precision)
+                      for entry, published_at, day_precision in entries)
                 )
             )
             return RSSFetchResult(
@@ -144,13 +151,18 @@ class RSSScraper(BaseScraper):
             return RSSFetchResult(source.name, str(source.url), "error", [], error)
 
     async def _build_item(
-        self, source: RSSSourceConfig, entry: dict, published_at: datetime
+        self, source: RSSSourceConfig, entry: dict, published_at: datetime, day_precision: bool = False,
     ) -> ContentItem:
         feed_id = str(source.url).split("//", 1)[1].replace("/", "_")
         entry_id = entry.get("id", entry.get("link", ""))
         entry_hash = hashlib.sha256(str(entry_id).encode("utf-8")).hexdigest()[:16]
         feed_content = "" if source.require_content_extraction else self._extract_content(entry)
         content: Optional[str] = feed_content or None
+        publication = {}
+        if day_precision:
+            publication["published_precision"] = "day"
+        if source.publication_time == "article":
+            publication.update(publication_basis="feed_discussion", feed_published_at=published_at.isoformat())
         extraction = {
             "requested": bool(source.content_extractor),
             "status": "not_requested",
@@ -168,7 +180,15 @@ class RSSScraper(BaseScraper):
                 extraction["status"] = "missing_article_url"
             else:
                 async with self._article_semaphore:
-                    full, cleaning = await extractor.extract_with_receipt(url, self.client)
+                    if source.publication_time == "article":
+                        full, cleaning = await extractor.extract_with_receipt(url, self.client, include_publication=True)
+                    else:
+                        full, cleaning = await extractor.extract_with_receipt(url, self.client)
+                if original := cleaning.pop("publication", None):
+                    published_at = datetime.fromisoformat(original["published_at"])
+                    publication["publication_basis"] = "original_article"
+                    if original["precision"] == "day":
+                        publication["published_precision"] = "day"
                 if cleaning:
                     extraction["html_cleaning"] = cleaning
                 if full:
@@ -195,6 +215,7 @@ class RSSScraper(BaseScraper):
                 "source_family": source.source_family,
                 "tags": [tag.term for tag in entry.get("tags", [])],
                 "content_extraction": extraction,
+                **publication,
             },
         )
 

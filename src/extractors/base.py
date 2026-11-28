@@ -7,7 +7,8 @@ import httpx
 
 
 class BaseExtractor(ABC):
-    async def extract_with_receipt(self, url: str, client: httpx.AsyncClient) -> tuple[Optional[str], dict]:
+    async def extract_with_receipt(self, url: str, client: httpx.AsyncClient, *,
+                                   include_publication: bool = False) -> tuple[Optional[str], dict]:
         """Text plus per-request cleaning evidence; legacy extractors need no state."""
         return await self.extract(url, client), {}
 
