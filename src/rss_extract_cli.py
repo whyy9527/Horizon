@@ -1,4 +1,4 @@
-"""Fetch RSS article bodies with Horizon extractors, without invoking any AI stage."""
+"""Fetch RSS article bodies and configured public boards without an AI stage."""
 
 import argparse
 import asyncio
@@ -7,22 +7,52 @@ import logging
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Literal
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .extractors import ExtractorRegistry
 from .models import ExtractorConfig, RSSSourceConfig
+from .public_social_boards import collect
+from .public_social_works import work_address
 from .scrapers.rss import RSSScraper
 
 logger = logging.getLogger(__name__)
 
 
+class SocialWorkLink(BaseModel):
+    platform: Literal["xiaohongshu", "douyin"]
+    topic: str = Field(min_length=1)
+    url: str
+    terms: list[str] = Field(min_length=1)
+
+    @field_validator("url")
+    @classmethod
+    def check_original_url(cls, url, info):
+        if "platform" in info.data and not work_address(info.data["platform"], url)[1]:
+            raise ValueError("expected a platform original work URL")
+        return url
+
+    @field_validator("terms")
+    @classmethod
+    def check_terms(cls, terms):
+        if any(not term.strip() for term in terms):
+            raise ValueError("topic evidence terms must be non-blank")
+        return terms
+
+
+class SocialBoardsConfig(BaseModel):
+    platforms: list[Literal["xiaohongshu", "douyin"]] = Field(min_length=1)
+    window_days: int = Field(gt=0)
+    work_links: list[SocialWorkLink] = Field(default_factory=list)
+
+
 class RSSExtractionSources(BaseModel):
-    """The RSS-only slice of a Horizon source configuration."""
+    """Source types handled by this extraction-only entry point."""
 
     rss: List[RSSSourceConfig] = Field(default_factory=list)
+    social_trends: SocialBoardsConfig | None = None
 
 
 class RSSExtractionConfig(BaseModel):
@@ -38,7 +68,7 @@ class RSSExtractionConfig(BaseModel):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", required=True, help="JSON config containing sources.rss")
+    parser.add_argument("--config", required=True, help="JSON config containing the extraction sources")
     parser.add_argument("--output", required=True, help="Path for the JSON extraction receipt")
     parser.add_argument("--hours", type=int, default=24)
     parser.add_argument("--timeout", type=float, default=12.0)
@@ -73,7 +103,18 @@ async def run(args: argparse.Namespace) -> dict:
             source_concurrency=args.source_concurrency,
             article_concurrency=args.article_concurrency,
         )
-        results = await scraper.fetch_with_receipts(since)
+        social = config.sources.social_trends
+        social_boards = None
+        if social is None:
+            results = await scraper.fetch_with_receipts(since)
+        else:
+            results, social_boards = await asyncio.gather(
+                scraper.fetch_with_receipts(since),
+                asyncio.to_thread(
+                    collect, tuple(dict.fromkeys(social.platforms)), social.window_days,
+                    [link.model_dump() for link in social.work_links],
+                ),
+            )
     fetched_items = [item for result in results for item in result.items]
     extraction_counts = Counter(
         str(item.metadata.get("content_extraction", {}).get("status", "unknown"))
@@ -117,6 +158,7 @@ async def run(args: argparse.Namespace) -> dict:
         "items": [item.model_dump(mode="json") for item in items],
         "source_receipts": source_receipts,
         "extraction_status_counts": dict(sorted(extraction_counts.items())),
+        **({"social_boards": social_boards} if social_boards is not None else {}),
     }
 
 

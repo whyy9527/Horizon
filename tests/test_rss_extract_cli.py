@@ -24,14 +24,20 @@ def test_extraction_receipt_identifies_failed_articles_without_dropping_other_so
         RSSFetchResult("Quiet", "https://example.com/quiet", "http_200", []),
     ]
     monkeypatch.setattr(rss_extract_cli.RSSScraper, "fetch_with_receipts", AsyncMock(return_value=results))
+    social = {"schema": "horizon-social-boards/v1", "boards": [
+        {"platform": "douyin", "status": "ok", "rows": [{"rank": 1, "title": "AI topic"}]},
+        {"platform": "xiaohongshu", "status": "missing", "reason": "HTTP 404"},
+    ]}
+    monkeypatch.setattr(rss_extract_cli, "collect", lambda platforms, days, links: social)
     config = tmp_path / "config.json"
-    config.write_text('{"sources": {}}')
+    config.write_text('{"sources": {"social_trends": {"platforms": ["douyin", "xiaohongshu"], "window_days": 7}}}')
     output = tmp_path / "articles.json"
 
     args = rss_extract_cli.build_parser().parse_args(["--config", str(config), "--output", str(output)])
     result = json.loads(json.dumps(asyncio.run(rss_extract_cli.run(args))))
 
     assert [item["content"] for item in result["items"]] == ["Complete article."]
+    assert result["social_boards"] == social
     outage, partial, quiet = result["source_receipts"]
     assert outage["status"] == "failed"
     assert outage["failed_articles"] == [{"title": "missing", "url": str(failed.url), "status": "failed"}]

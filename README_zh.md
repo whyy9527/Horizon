@@ -310,6 +310,21 @@ docker compose run --rm horizon [OPTIONS]
 | **GDELT** | 按查询搜索新闻 | — |
 | **Google News** | 通过 RSS 搜索新闻 | — |
 
+### 小红书
+
+来源准备入口 `python -m src.rss_extract_cli` 支持在 `sources.social_trends.platforms` 中启用
+`xiaohongshu`。同一份 `social_boards` 快照保留榜位、热词、作品关联和失败原因。
+
+```sh
+python -m src.xiaohongshu_cli hot
+python -m src.xiaohongshu_cli hot --date 2026-11-25
+python -m src.xiaohongshu_cli note '小红书原帖或分享链接'
+```
+
+`hot` 使用北京时间。小红书采集使用匿名、免费的公开来源。要求登录或账号验证的作品链接
+会留下失败记录。已核对的热点和原帖链接可以通过 `sources.social_trends.work_links`
+提供给来源准备。榜单只有搜索链接时，快照记录缺少原帖。
+
 ## 日报可以去哪里
 
 Horizon 支持通过多种方式发布和分发生成的日报：
